@@ -166,4 +166,6 @@ If you use this pipeline in your research, please cite:
 
 ## License
 
-For research and academic use. Contact authors for commercial licensing.
+This software is licensed under the [Emory University License](LICENSE) for **non-commercial research purposes only**. See the LICENSE file for full terms and conditions.
+
+For commercial licensing inquiries, contact Emory University.
