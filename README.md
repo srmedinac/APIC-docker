@@ -1,4 +1,4 @@
-# APIC - AI-based Predictive Imaging for Cancer
+# APIC - AI-based Pathology Image Classifier 
 
 A computational pathology pipeline for predicting docetaxel benefit in prostate cancer patients.
 
