@@ -30,9 +30,9 @@ docker pull madabhushilabapic/apic:latest
 ### Run the Pipeline
 
 ```bash
-docker run --gpus all --rm \
-  -v /path/to/input/slides:/data/input_slides:ro \
-  -v /path/to/output:/data/output \
+docker run --gpus all \
+  -v /path/to/your/slides:/data/input_slides:ro \
+  -v /path/to/your/output:/data/output \
   madabhushilabapic/apic:latest \
   -i "/data/input_slides/slide_filename.ext" \
   -o /data/output
@@ -44,14 +44,36 @@ docker run --gpus all --rm \
 
 ## Docker Command Explained
 
+Your data stays on your machine—the container only accesses it through mounted paths.
+
+### Volume Mounts (`-v`)
+
+The `-v` flag maps a folder on **your system** to a folder **inside the container**:
+
+```text
+-v /your/local/path:/container/path
+    ↑                 ↑
+    YOUR SYSTEM       CONTAINER (don't change)
+```
+
+| Mount | Your System (change this) | Container Path (keep as-is) |
+| ----- | ------------------------- | --------------------------- |
+| Input | `/path/to/your/slides` | `/data/input_slides:ro` |
+| Output | `/path/to/your/output` | `/data/output` |
+
+### Pipeline Arguments
+
+| Flag | Value | Description |
+| ---- | ----- | ----------- |
+| `-i` | `/data/input_slides/slide.ext` | Path to WSI **inside container** (use container path + filename) |
+| `-o` | `/data/output` | Output directory **inside container** (keep as-is) |
+
+### Optional Docker Flags
+
 | Flag | Description |
 | ---- | ----------- |
-| `--gpus all` | Enable GPU acceleration (optional) |
-| `--rm` | Remove container after execution |
-| `-v /path/to/input/slides:/data/input_slides:ro` | Mount input folder (read-only) |
-| `-v /path/to/output:/data/output` | Mount output folder |
-| `-i "/data/input_slides/slide.ext"` | Input WSI file path (inside container) |
-| `-o /data/output` | Output directory (inside container) |
+| `--gpus all` | Enable GPU acceleration (omit if no GPU) |
+| `--rm` | Auto-remove container after execution (optional, keeps system clean) |
 
 ---
 
