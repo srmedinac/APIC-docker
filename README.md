@@ -1,40 +1,75 @@
-# APIC Project
+# APIC - AI-based Predictive Imaging for Cancer
 
-## Description
-The **APIC Project** is an automated analysis pipeline that generates a **patient-level PDF report** from a **Whole Slide Image (WSI)**.  
-For each patient, the pipeline performs a complete computational pathology analysis and outputs a **risk score with clinical interpretation** in an automatically generated PDF report.
+A computational pathology pipeline for predicting docetaxel benefit in prostate cancer patients.
+
+## Overview
+
+APIC analyzes **Whole Slide Images (WSI)** from prostate cancer biopsies to generate a **patient-level risk score** that predicts whether a patient with **advanced prostate cancer** will benefit from **docetaxel chemotherapy**.
+
+The pipeline uses AI-driven nuclear segmentation and spatial analysis to extract features from tumor tissue, producing an automated PDF report with:
+
+- Patient-specific risk score
+- Clinical interpretation
+- Prognostic estimates
+- Treatment considerations
+
+### Clinical Context
+
+For patients with localized high-risk or metastatic hormone-sensitive prostate cancer, adding docetaxel to androgen deprivation therapy (ADT) can improve outcomes—but not all patients benefit equally. APIC provides a computational biomarker derived from routine H&E-stained biopsy images to help identify patients most likely to benefit from docetaxel intensification.
+
+---
+
+## Quick Start
+
+### Pull the Docker Image
+
+```bash
+docker pull madabhushilabapic/apic:latest
+```
+
+### Run the Pipeline
+
+```bash
+docker run --gpus all --rm \
+  -v /path/to/input/slides:/data/input_slides:ro \
+  -v /path/to/output:/data/output \
+  madabhushilabapic/apic:latest \
+  -i "/data/input_slides/slide_filename.ext" \
+  -o /data/output
+```
+
+> **Note:** GPU is optional. If unavailable, the pipeline automatically falls back to CPU execution.
+
+---
+
+## Docker Command Explained
+
+| Flag | Description |
+| ---- | ----------- |
+| `--gpus all` | Enable GPU acceleration (optional) |
+| `--rm` | Remove container after execution |
+| `-v /path/to/input/slides:/data/input_slides:ro` | Mount input folder (read-only) |
+| `-v /path/to/output:/data/output` | Mount output folder |
+| `-i "/data/input_slides/slide.ext"` | Input WSI file path (inside container) |
+| `-o /data/output` | Output directory (inside container) |
 
 ---
 
 ## GPU Support (Optional)
 
-This pipeline supports **GPU acceleration** using the **NVIDIA Container Toolkit**.  
-If a GPU is **not available**, the pipeline will **automatically fall back to CPU execution**.
+This pipeline supports **GPU acceleration** using the **NVIDIA Container Toolkit**. Follow the steps below to enable GPU support on Ubuntu/Debian systems.
 
----
+### Install NVIDIA Container Toolkit
 
-## NVIDIA Container Toolkit Installation  
-(For Ubuntu / Debian-based systems)
+Reference: [NVIDIA Container Toolkit Installation Guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
 
-> Reference:  
-> https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
-
-> **Note**  
-> These instructions should work for any Debian-derived distribution.
-
----
-
-### Install Prerequisites
-#### With `apt`: Ubuntu, Debian
-1. Install the prerequisites for the instructions below:
+**Install prerequisites:**
 
 ```bash
-sudo apt-get update && sudo apt-get install -y --no-install-recommends \
-  curl \
-  gnupg2
+sudo apt-get update && sudo apt-get install -y curl gnupg2
 ```
 
-2. Configure the production repository:
+**Configure the repository:**
 
 ```bash
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
@@ -42,108 +77,71 @@ curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dear
     sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
     sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
 ```
-Optionally, configure the repository to use experimental packages:
 
-```bash
-sudo sed -i -e '/experimental/ s/^#//g' /etc/apt/sources.list.d/nvidia-container-toolkit.list
-```
-3. Update the packages list from the repository:
+**Install the toolkit:**
 
 ```bash
 sudo apt-get update
-```
-4. Install the NVIDIA Container Toolkit packages:
-
-```bash
 export NVIDIA_CONTAINER_TOOLKIT_VERSION=1.18.1-1
-  sudo apt-get install -y \
-      nvidia-container-toolkit=${NVIDIA_CONTAINER_TOOLKIT_VERSION} \
-      nvidia-container-toolkit-base=${NVIDIA_CONTAINER_TOOLKIT_VERSION} \
-      libnvidia-container-tools=${NVIDIA_CONTAINER_TOOLKIT_VERSION} \
-      libnvidia-container1=${NVIDIA_CONTAINER_TOOLKIT_VERSION}
+sudo apt-get install -y \
+    nvidia-container-toolkit=${NVIDIA_CONTAINER_TOOLKIT_VERSION} \
+    nvidia-container-toolkit-base=${NVIDIA_CONTAINER_TOOLKIT_VERSION} \
+    libnvidia-container-tools=${NVIDIA_CONTAINER_TOOLKIT_VERSION} \
+    libnvidia-container1=${NVIDIA_CONTAINER_TOOLKIT_VERSION}
 ```
 
-### Configuration
-#### Prerequisites
-<li>
-  You installed Docker.</li>
- <li>
-  You installed the NVIDIA Container Toolkit.
-</li>
+### Configure Docker for GPU
 
-### Configuring Docker
-1. Configure the container runtime by using the nvidia-ctk command:
+**Configure the runtime:**
+
 ```bash
 sudo nvidia-ctk runtime configure --runtime=docker
 ```
 
-The nvidia-ctk command modifies the /etc/docker/daemon.json file on the host. The file is updated so that Docker can use the NVIDIA Container Runtime.
+**Restart Docker:**
 
-2. Restart the Docker daemon:
 ```bash
 sudo systemctl restart docker
 ```
 
-## Running the APIC Pipeline
-### Docker Pull command
-```bash
-sudo docker pull madabhushilabapic/apic:latest
-```
+---
 
-### Docker Run Command (GPU Enabled)
-```bash
-sudo docker run --gpus all --rm \
-  -v /path/to/root/input/slides:/data/input_slides:ro \
-  -v /path/to/root/output:/data/output \
-  madabhushilabapic/apic:latest \
-  -i "/data/input_slides/slide_filename.ext" \
-  -o /data/output
-```
+## Output
 
-#### Explanation of Docker Paths
-```bash
--v /path/to/root/input/slides:/data/input_slides:ro
-```
-<li><b>Host path</b>: Location of input Whole Slide Images</li>
-<li><b>Container path</b>: `/data/input_slides`</li>
-<li>`:ro` -> Mounted as read-only to prevent accidental modification</li>
+For each patient, the pipeline generates a PDF report containing:
 
-```bash
--v /path/to/root/output:/data/output
-```
-<li><b>Host path</b>: Location of input Whole Slide Images</li>
-<li><b>Container path</b>: `/data/input_slides`</li>
-<li>Stores generated reports and intermediate results</li>
+- **Risk Score:** A quantitative measure derived from tissue morphology
+- **Clinical Interpretation:** Whether the patient is predicted to benefit from docetaxel
+- **Prognostic Estimates:** Expected outcomes based on the risk stratification
+- **Treatment Considerations:** Context for clinical decision-making
 
-```bash
--i "/data/input_slides/slide_filename.ext"
-```
-<li> Input WSI file inside the container</li>
+---
 
-```bash
--o /data/putput
-```
-<li> Output directory inside the container</li>
+## Limitations
 
-### Output
-For each patient, the pipeline generates a **comprehensive PDF report** that includes:
-<li>Patient-specific risk score</li>
-<li>Interpretation of the risk score</li>  
-<li>Prognostic estimates </li> 
-<li>Treatment considerations</li>
+- Currently accepts **one slide per patient**
+- In batch mode, each slide is treated as a separate patient
 
-### Caveats
-<li>Currently, the pipeline accepts one slide per patient</li>
-<li>In batch mode, <b>each slide is assumed to belong to a different patient</b></li>
+### Planned Improvements
 
-### Future Improvements
-<li>Support multiple slides per patient</li>
-<li>Accept a folder of slides per patient</li>
-<li>Aggregate and average features across slides</li>
-<li>Generate a <b>single patient-level summary risk score</b></li>
+- Support for multiple slides per patient
+- Aggregation of features across slides
+- Single patient-level summary from multiple biopsies
 
-### Citation
-If you use this pipeline in your research, please cite our work:
+---
 
-[Sebastian Medina, Naoto Tokuyama, Kamal Hammouda, Tilak Pathak, Tuomas Mirtti, Pingfu Fu, Shilpa Gupta, Priti Lal, Howard M. Sandler, Rohann Correa, Susan Chafe, Amit Shah, Jason A. Efstathiou, Karen Hoffman, Michael Straza, Mark A. Hallman, Richard Jordan, Stephanie L. Pugh, Christopher J. Sweeney, Anant Madabhushi; A Computational Pathology Model to Predict Docetaxel Benefit in Localized High-Risk and Metastatic Prostate Cancer. Clin Cancer Res 2025; https://doi.org/10.1158/1078-0432.CCR-25-3327]
- 
+## Citation
+
+If you use this pipeline in your research, please cite:
+
+> Medina S, Tokuyama N, Hammouda K, Pathak T, Mirtti T, Fu P, Gupta S, Lal P, Sandler HM, Correa R, Chafe S, Shah A, Efstathiou JA, Hoffman K, Straza M, Hallman MA, Jordan R, Pugh SL, Sweeney CJ, Madabhushi A. **A Computational Pathology Model to Predict Docetaxel Benefit in Localized High-Risk and Metastatic Prostate Cancer.** *Clin Cancer Res* 2025. [DOI: 10.1158/1078-0432.CCR-25-3327](https://doi.org/10.1158/1078-0432.CCR-25-3327)
+
+---
+
+## Disclaimer
+
+**For research purposes only.** This tool is not intended for clinical use and should not be used to diagnose, treat, or make clinical decisions for any patient. The predictions generated by this pipeline have not been validated for clinical practice and are meant solely for academic and research applications.
+
+## License
+
+For research and academic use. Contact authors for commercial licensing.
