@@ -699,7 +699,8 @@ def load_model(path, mode, nr_types):
        
         net = create_model(input_ch=3, nr_types=nr_types, freeze=False, mode=mode)
         
-        saved_state_dict = torch.load(path)["desc"]
+        saved_state_dict = torch.load(path, weights_only=False)["desc"]
+        
         
         saved_state_dict = convert_pytorch_checkpoint(saved_state_dict)
         
