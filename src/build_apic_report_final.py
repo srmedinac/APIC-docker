@@ -1,66 +1,29 @@
-# build_apic_report_final.py
-import io, sys, argparse, random
+import io, sys, argparse
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageOps
-from reportlab.platypus import Paragraph, Frame
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.enums import TA_LEFT
-from reportlab.lib import colors
-import fitz  # PyMuPDF
+Image.MAX_IMAGE_PIXELS = None
+
+import fitz
 from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4  # 595 x 842 pt
-from reportlab.lib.units import mm
 from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 
 PAGE_W, PAGE_H = A4
 
-# ==============================
-# STYLE / COLOR (match PDF2)
-# ==============================
-POS_FILL = colors.HexColor("#e97d74")  # salmon/red (Positive)
-NEG_FILL = colors.HexColor("#5a97ac")  # teal/blue (Negative)
-TEXT_COLOR = colors.black
+POS_FILL = colors.HexColor("#e97d74")
+NEG_FILL = colors.HexColor("#5a97ac")
 
-# ==============================
-# LAYOUT: PAGE 1 INSERT COORDS
-# (adjust these values a few pt/mm if you need micro-alignment)
-# All sizes/positions in points; 1 mm = 2.83465 pt
-# ==============================
-# Conclusion block
-CONC_ICON_CENTER = (20*mm, PAGE_H - 92*mm)     # center (x,y) for +/- icon
-CONC_ICON_RADIUS = 8*mm
-CONC_TEXT_FRAME  = (42*mm, PAGE_H - 110*mm, 155*mm, 30*mm)  # (x, y, w, h)
-
-# Treatment Considerations (one-line uppercase string)
-TREAT_TEXT_FRAME = (43*mm, PAGE_H - 216*mm, 170*mm, 28*mm)
-
-# Interpretation & Quality Control:
-# Part-1: vertical bar + pointer + value
-BAR_X, BAR_Y = (10*mm, PAGE_H - 270*mm)  # bottom-left of bar
+BAR_X, BAR_Y = (10*mm, PAGE_H - 270*mm)
 BAR_W, BAR_H = (12*mm, 40*mm)
-POINTER_RIGHT_PAD = 12  # px gap for arrow width to the right of the bar
-# Pointer value text
-POINTER_VALUE_DX = 28
-POINTER_VALUE_DY = -3
-
-# Part-2: biopsy analyzed image
-BIOPSY_IMG_FRAME = (45*mm, PAGE_H - 270*mm, 85*mm, 48*mm)  # (x,y,w,h)
-
-# Part-3: 4-grid spatil visualizations
-GRID_X, GRID_Y = (142*mm, PAGE_H - 242*mm)  # top-left of grid
+BIOPSY_IMG_FRAME = (45*mm, PAGE_H - 270*mm, 85*mm, 48*mm)
+GRID_X, GRID_Y = (142*mm, PAGE_H - 242*mm)
 CELL_W, CELL_H, CELL_GAP = (22*mm, 22*mm, 7*mm)
 
-
-
-# ==============================
-# UTILITIES
-# ==============================
-def mm2pt(xmm: float) -> float:
-    return xmm * mm
 
 def _pil_reader(img: Image.Image) -> ImageReader:
     bio = io.BytesIO()
@@ -75,18 +38,6 @@ def rasterize_page(pdf_path: Path, page_index: int, dpi=300) -> ImageReader:
     img = Image.frombytes("RGB", (pm.width, pm.height), pm.samples)
     doc.close()
     return _pil_reader(img)
-
-# def draw_image_keep_ar(c: canvas.Canvas, img_path: Path, x, y, w, h):
-#     try:
-#         im = Image.open(img_path)
-#         im = ImageOps.exif_transpose(im)
-#         iw, ih = im.size
-#         s = min(w/iw, h/ih)
-#         dw, dh = iw*s, ih*s
-#         c.drawImage(_pil_reader(im), x + (w-dw)/2, y + (h-dh)/2, dw, dh,
-#                     preserveAspectRatio=False, mask='auto')
-#     except Exception:
-#         pass
 
 def _draw_pil_keep_ar(c: canvas.Canvas, im: Image.Image, x, y, w, h):
     """Draw a PIL image into (x,y,w,h) while preserving aspect ratio."""
@@ -155,30 +106,16 @@ def posneg_label(score: float, cutoff: float):
 
 
 
-# ==============================
-# DRAWING PRIMITIVES (DYNAMIC)
-# ==============================
 def draw_plus_minus_icon(c: canvas.Canvas, cx, cy, r, label_symbol: str):
-    # [DYNAMIC] Conclusion icon (+ red or - green)
+    """Draw +/- icon (unused - icon now in template)."""
     fill = POS_FILL if label_symbol == "+" else NEG_FILL
     c.setFillColor(fill)
     c.circle(cx, cy, r, fill=1, stroke=0)
     c.setStrokeColor(colors.white)
     c.setLineWidth(6)
-    # symbol strokes
-    c.line(cx - r*0.65, cy, cx + r*0.65, cy)         # horizontal
-    if label_symbol == "+":                           # vertical only for plus
+    c.line(cx - r*0.65, cy, cx + r*0.65, cy)
+    if label_symbol == "+":
         c.line(cx, cy - r*0.65, cx, cy + r*0.65)
-
-def draw_conclusion_text(c: canvas.Canvas, x, y, w, h, posneg: str):
-    # Text is now in the PDF template - no dynamic text needed
-    # The template already contains the appropriate text for POSITIVE/NEGATIVE
-    pass
-
-def draw_treatment_consideration_line(c: canvas.Canvas, x, y, w, h, posneg: str):
-    # Text is now in the PDF template - no dynamic text needed
-    # The template already contains the "ON AVERAGE..." text
-    pass
 
 def draw_vertical_posneg_bar_with_pointer(c: canvas.Canvas, x, y, w, h, score: float, cutoff: float):
     """
@@ -319,7 +256,7 @@ def draw_biopsy_overlay(c: canvas.Canvas, qc_dir: Path, patient_id: str, frame):
 
 
 def draw_spatil_grid(c: canvas.Canvas, viz_dir: Path):
-    # [DYNAMIC] 2x2 grid of spatil visualizations
+    """Draw 2x2 grid of spatil visualizations."""
     imgs = sorted(viz_dir.glob("*.png"))[:4]
     for i, p in enumerate(imgs):
         row, col = divmod(i, 2)
@@ -328,9 +265,6 @@ def draw_spatil_grid(c: canvas.Canvas, viz_dir: Path):
         draw_image_keep_ar(c, p, xx, yy, CELL_W, CELL_H)
 
 
-# ==============================
-# COMPOSER (PER PATIENT)
-# ==============================
 def make_report_for_patient(pdir: Path, page1_template_pos: Path, page1_template_neg: Path, page2_template: Path, out_root: Path):
     patient_id = pdir.name
     ff_dir = pdir / "final_features"
@@ -338,65 +272,35 @@ def make_report_for_patient(pdir: Path, page1_template_pos: Path, page1_template
     viz_dir = pdir / "spatil_visualizations" / patient_id
 
     threshold, risk_score = read_threshold_and_score(ff_dir)
-
-    # decide POS/NEG by comparing risk_score to threshold from CSV
     posneg, symbol = posneg_label(risk_score, threshold)
 
-    # choose Page 1 background by outcome
     if posneg == "NEGATIVE" and page1_template_neg and page1_template_neg.is_file():
         page1_bg = rasterize_page(page1_template_neg, 0, dpi=300)
     else:
         page1_bg = rasterize_page(page1_template_pos, 0, dpi=300)
-
-    # page backgrounds
-    # page1_bg = rasterize_page(page1_template_pos, 0, dpi=300)
     page2_bg = rasterize_page(page2_template, 1, dpi=300)
 
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
 
-    # ---------- PAGE 1 BACKGROUND ----------
     c.drawImage(page1_bg, 0, 0, width=PAGE_W, height=PAGE_H, preserveAspectRatio=False, mask='auto')
-
-    # [DYNAMIC] Conclusion icon (+/-)
-    draw_plus_minus_icon(c, CONC_ICON_CENTER[0], CONC_ICON_CENTER[1], CONC_ICON_RADIUS, symbol)
-
-    # [DYNAMIC] Conclusion text block
-    draw_conclusion_text(c, *CONC_TEXT_FRAME, posneg=posneg)
-
-    # [DYNAMIC] Treatment considerations line
-    draw_treatment_consideration_line(c, *TREAT_TEXT_FRAME, posneg=posneg)
-
-    # [DYNAMIC] Interpretation & QC — Part 1: bar + pointer + value
     draw_vertical_posneg_bar_with_pointer(c, BAR_X, BAR_Y, BAR_W, BAR_H, score=risk_score, cutoff=threshold)
-
-    # [DYNAMIC] Interpretation & QC — Part 2: biopsy overlay
     draw_biopsy_overlay(c, qc_dir, patient_id, BIOPSY_IMG_FRAME)
-
-    # [DYNAMIC] Interpretation & QC — Part 3: 4-image grid from patient viz
     if viz_dir.exists():
         draw_spatil_grid(c, viz_dir)
-
     c.showPage()
 
-    # ---------- PAGE 2 BACKGROUND ----------
     c.drawImage(page2_bg, 0, 0, width=PAGE_W, height=PAGE_H, preserveAspectRatio=False, mask='auto')
     c.showPage()
     c.save()
 
-    # write outputs
-    out_dir = pdir / "report"
-    out_dir.mkdir(parents=True, exist_ok=True)
     out_pdf_name = f"APIC_report_{patient_id}.pdf"
-
-    # patient-specific folder: results/<patient>/report/
     patient_report_dir = pdir / "report"
     patient_report_dir.mkdir(parents=True, exist_ok=True)
     patient_pdf = patient_report_dir / out_pdf_name
     with open(patient_pdf, "wb") as f:
         f.write(buf.getvalue())
 
-    # centralized folder: results/reports/  (from --out-dir)
     if out_root:
         out_root.mkdir(parents=True, exist_ok=True)
         root_pdf = out_root / out_pdf_name
@@ -421,6 +325,7 @@ def main():
     ap.add_argument("--page1-template-neg", default=None, help="Optional alternate Page 1 template for APIC NEGATIVE")
     ap.add_argument("--page2-template", required=True, help="Reference PDF 2 (styled page 2)")
     ap.add_argument("--out-dir", default=None)
+    ap.add_argument("--patient", default=None, help="Specific patient ID to generate report for (optional, defaults to all)")
     args = ap.parse_args()
 
     results_root = Path(args.results_root).resolve()
@@ -434,7 +339,18 @@ def main():
     if not page1_template_neg.is_file(): print("page1-template-negative not found", file=sys.stderr); sys.exit(1)
     if not page2_template.is_file(): print("page2-template not found", file=sys.stderr); sys.exit(1)
 
-    for pdir in find_patients(results_root):
+    # Filter to specific patient if provided
+    if args.patient:
+        patient_dir = results_root / args.patient
+        if patient_dir.is_dir() and (patient_dir / "final_features").is_dir():
+            patients = [patient_dir]
+        else:
+            print(f"[WARN] Patient directory not found or incomplete: {args.patient}", file=sys.stderr)
+            patients = []
+    else:
+        patients = find_patients(results_root)
+
+    for pdir in patients:
         try:
             make_report_for_patient(pdir, page1_template_pos, page1_template_neg, page2_template, out_root)
         except Exception as e:
@@ -442,19 +358,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# Example usage:
-# python build_apic_report_final.py \
-#   --results-root /home/vputcha/emory/APIC-container-1/docker_container/data/results \
-#   --page1-template /home/vputcha/emory/APIC-container-1/HUG-REPORT-EMPTY.pdf \
-#   --page2-template /mnt/d/vputcha_projects/prostate_cancer/APIC/APIC-Container/HUG_report.pdf \
-#   --out-dir /home/vputcha/emory/APIC-container-1/docker_container/data/results/reports \
-
-# example usage:
-# python build_apic_report_final.py \
-#   --results-root /home/vputcha/emory/APIC-container-1/docker_container/data/results/PT3 \
-#   --page1-template-pos /home/vputcha/emory/APIC-container-1/docker_container/data/HUG-REPORT-EMPTY-POSITIVE.pdf \
-#   --page1-template-neg /home/vputcha/emory/APIC-container-1/docker_container/data/HUG-REPORT-EMPTY-NEGATIVE.pdf \
-#   --page2-template /home/vputcha/emory/APIC-container-1/docker_container/data/HUG_report.pdf \
-#   --out-dir /home/vputcha/emory/APIC-container-1/test_data/results/reports

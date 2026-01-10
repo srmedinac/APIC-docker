@@ -29,10 +29,6 @@ from PIL import Image
 # Allow large images
 Image.MAX_IMAGE_PIXELS = None
 
-# =============================================================================
-# Logging Configuration
-# =============================================================================
-
 def setup_logging():
     """Configure logging with timestamps and flush-on-write."""
     logging.basicConfig(
@@ -105,10 +101,6 @@ def run_subprocess(cmd: list, description: str = None, env=None):
         raise subprocess.CalledProcessError(process.returncode, cmd)
 
 
-# =============================================================================
-# Nuclear Diversity Feature Utilities
-# =============================================================================
-
 SHAPE_FEATURES = [
     'Area', 'MajorAxisLength', 'MinorAxisLength', 'Eccentricity',
     'EquivDiameter', 'Solidity', 'Perimeter', 'Circularity'
@@ -161,10 +153,6 @@ def convert_mat_to_csv(mat_path: Path, csv_path: Path, slide_name: str):
 
     logger.info(f"Converted .mat to CSV: {csv_path.name}")
 
-
-# =============================================================================
-# Pipeline Class
-# =============================================================================
 
 class APICPipeline:
     """APIC Biomarker Pipeline - Steps 3-8."""
@@ -234,9 +222,6 @@ class APICPipeline:
             return False
         return path.exists() if path else False
 
-    # -------------------------------------------------------------------------
-    # Step 3: Nuclei Segmentation
-    # -------------------------------------------------------------------------
     def step3_nuclei_segmentation(self):
         """Run HoVerNet nuclei segmentation on patches."""
         log_step_header("Nuclei Segmentation", 3)
@@ -291,9 +276,6 @@ class APICPipeline:
         log_step_complete("Nuclei segmentation", time.time() - start)
         logger.info(f"Output: {final_count} segmentation masks")
 
-    # -------------------------------------------------------------------------
-    # Step 4: spaTIL Features
-    # -------------------------------------------------------------------------
     def step4_spatil_features(self):
         """Extract spaTIL spatial features from nuclei masks."""
         log_step_header("spaTIL Feature Extraction", 4)
@@ -331,9 +313,6 @@ class APICPipeline:
         log_step_complete("spaTIL features", time.time() - start)
         logger.info(f"Output: {feature_count} feature files, {viz_count} visualizations")
 
-    # -------------------------------------------------------------------------
-    # Step 5: Nuclear Diversity Features
-    # -------------------------------------------------------------------------
     def step5_nucdiv_features(self):
         """Extract nuclear diversity features using MATLAB or Python."""
         log_step_header("Nuclear Diversity Features", 5)
@@ -410,9 +389,6 @@ class APICPipeline:
         log_step_complete("Nuclear diversity features", time.time() - start)
         logger.info(f"Output: {csv_output.name}")
 
-    # -------------------------------------------------------------------------
-    # Step 6: Feature Aggregation
-    # -------------------------------------------------------------------------
     def step6_aggregate_features(self):
         """Aggregate patch-level features to slide-level."""
         log_step_header("Feature Aggregation", 6)
@@ -466,9 +442,6 @@ class APICPipeline:
 
         log_step_complete("Feature aggregation", time.time() - start)
 
-    # -------------------------------------------------------------------------
-    # Step 7: Biomarker Prediction
-    # -------------------------------------------------------------------------
     def step7_predict_biomarker(self):
         """Run Cox model prediction."""
         log_step_header("Biomarker Prediction", 7)
@@ -524,9 +497,6 @@ class APICPipeline:
         log_step_complete("Biomarker prediction", time.time() - start)
         logger.info(f"Result: {risk_group} (risk score: {risk_score:.3f})")
 
-    # -------------------------------------------------------------------------
-    # Step 8: Tissue Overlay & Report
-    # -------------------------------------------------------------------------
     def step8_create_overlay(self):
         """Create tissue overlay visualization."""
         log_step_header("Tissue Overlay", 8)
@@ -601,15 +571,13 @@ class APICPipeline:
             "--page2-template", "data/HUG_report.pdf",
             "--out-dir", str(self.dirs['report']),
             "--out-dir", str(self.output_dir / "reports"),
+            "--patient", self.slide_name,
         ]
 
         run_subprocess(cmd, "APIC report builder")
 
         log_step_complete("APIC report", time.time() - start)
 
-    # -------------------------------------------------------------------------
-    # Pipeline Runner
-    # -------------------------------------------------------------------------
     def run(self, steps: list = None):
         """
         Run pipeline steps.
@@ -684,9 +652,286 @@ class APICPipeline:
         logger.info("=" * 60)
 
 
-# =============================================================================
-# Main Entry Point
-# =============================================================================
+class APICPatientPipeline:
+    """APIC Multi-Slide Patient Pipeline - Aggregates features across slides."""
+
+    def __init__(self, patient_id: str, patient_folder: str, output_dir: str, config: dict = None):
+        """
+        Initialize patient-level pipeline.
+
+        Args:
+            patient_id: Patient identifier (typically folder name)
+            patient_folder: Path to folder containing multiple slides
+            output_dir: Root output directory
+            config: Optional configuration override
+        """
+        self.patient_id = patient_id
+        self.patient_folder = Path(patient_folder).resolve()
+        self.output_dir = Path(output_dir).resolve()
+        self.config = config or APICPipeline.DEFAULT_CONFIG
+
+        # Patient-level output directory
+        self.patient_output_dir = self.output_dir / self.patient_id
+        self.patient_output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Directories for patient-level outputs
+        self.dirs = {
+            'final': self.patient_output_dir / "final_features",
+            'qc': self.patient_output_dir / "qc",
+            'report': self.patient_output_dir / "report",
+            'spatil_viz': self.patient_output_dir / "spatil_visualizations" / self.patient_id,
+        }
+        for dir_path in self.dirs.values():
+            dir_path.mkdir(parents=True, exist_ok=True)
+
+        # Find all processed slide directories
+        self.slide_dirs = self._find_slide_directories()
+
+        logger.info(f"Patient pipeline initialized for: {self.patient_id}")
+        logger.info(f"Found {len(self.slide_dirs)} processed slides")
+
+    def _find_slide_directories(self) -> list:
+        """Find all slide output directories for this patient's slides."""
+        slide_dirs = []
+        supported_exts = ['svs', 'tif', 'tiff', 'ndpi', 'mrxs', 'scn']
+
+        for ext in supported_exts:
+            for slide_path in self.patient_folder.glob(f"*.{ext}"):
+                slide_name = slide_path.stem
+                slide_output = self.output_dir / slide_name
+                if slide_output.exists() and (slide_output / "final_features").exists():
+                    slide_dirs.append(slide_output)
+
+        return sorted(slide_dirs)
+
+    def _get_tissue_area(self, slide_dir: Path) -> float:
+        """Get total tissue area from a slide's QC mask."""
+        import cv2
+
+        slide_name = slide_dir.name
+        # Look for the tissue mask
+        qc_dir = slide_dir / "qc"
+        mask_patterns = [
+            qc_dir / f"{slide_name}*" / f"*_mask_use.png",
+        ]
+
+        # Find mask file
+        mask_path = None
+        for pattern in mask_patterns:
+            matches = list(qc_dir.glob(f"{slide_name}*/*_mask_use.png"))
+            if matches:
+                mask_path = matches[0]
+                break
+
+        if mask_path is None or not mask_path.exists():
+            logger.warning(f"No tissue mask found for {slide_name}, returning 0")
+            return 0.0
+
+        try:
+            mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+            if mask is None:
+                return 0.0
+            # Count white pixels (tissue area)
+            return float(np.sum(mask > 127))
+        except Exception as e:
+            logger.warning(f"Error reading mask for {slide_name}: {e}")
+            return 0.0
+
+    def aggregate_patient_features(self):
+        """Aggregate slide-level features to patient level using np.nanmean."""
+        log_step_header("Patient-Level Feature Aggregation", "P1")
+        start = time.time()
+
+        spatil_output = self.dirs['final'] / f"{self.patient_id}_spatil_aggregated.csv"
+        nucdiv_output = self.dirs['final'] / f"{self.patient_id}_nucdiv.csv"
+
+        # Collect spaTIL features from all slides
+        all_spatil = []
+        spatil_columns = None
+        for slide_dir in self.slide_dirs:
+            spatil_file = slide_dir / "final_features" / f"{slide_dir.name}_spatil_aggregated.csv"
+            if spatil_file.exists():
+                df = pd.read_csv(spatil_file)
+                spatil_columns = df.columns
+                all_spatil.append(df.values[0])
+                logger.info(f"  Loaded spaTIL from: {slide_dir.name}")
+
+        if all_spatil:
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=RuntimeWarning)
+                mean_spatil = np.nanmean(np.vstack(all_spatil), axis=0)
+
+            pd.DataFrame([mean_spatil], columns=spatil_columns).to_csv(spatil_output, index=False)
+            logger.info(f"  Aggregated {len(all_spatil)} slides -> {spatil_output.name}")
+        else:
+            logger.warning("No spaTIL features found to aggregate")
+
+        # Collect nucdiv features from all slides
+        all_nucdiv = []
+        nucdiv_columns = None
+        for slide_dir in self.slide_dirs:
+            nucdiv_file = slide_dir / "final_features" / f"{slide_dir.name}_nucdiv.csv"
+            if nucdiv_file.exists():
+                df = pd.read_csv(nucdiv_file)
+                nucdiv_columns = df.columns
+                all_nucdiv.append(df.values[0])
+                logger.info(f"  Loaded nucdiv from: {slide_dir.name}")
+
+        if all_nucdiv:
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=RuntimeWarning)
+                mean_nucdiv = np.nanmean(np.vstack(all_nucdiv), axis=0)
+
+            pd.DataFrame([mean_nucdiv], columns=nucdiv_columns).to_csv(nucdiv_output, index=False)
+            logger.info(f"  Aggregated {len(all_nucdiv)} slides -> {nucdiv_output.name}")
+        else:
+            logger.warning("No nucdiv features found to aggregate")
+
+        log_step_complete("Patient feature aggregation", time.time() - start)
+
+    def predict_biomarker(self):
+        """Run Cox model prediction on patient-averaged features."""
+        log_step_header("Patient Biomarker Prediction", "P2")
+        start = time.time()
+
+        prediction_output = self.dirs['final'] / f"{self.patient_id}_prediction.csv"
+
+        # Load patient-level features
+        spatil_file = self.dirs['final'] / f"{self.patient_id}_spatil_aggregated.csv"
+        nucdiv_file = self.dirs['final'] / f"{self.patient_id}_nucdiv.csv"
+
+        if not spatil_file.exists() or not nucdiv_file.exists():
+            raise FileNotFoundError("Patient-level feature files missing.")
+
+        spatil_features = pd.read_csv(spatil_file)
+        nucdiv_features = pd.read_csv(nucdiv_file)
+
+        # Select features for Cox model
+        patient_features = pd.DataFrame({
+            'patient_id': [self.patient_id],
+            'Area.Energy.var': [nucdiv_features['Area.Energy.var'].values[0]],
+            'Area.InvDiffMom.Skewness': [nucdiv_features['Area.InvDiffMom.Skewness'].values[0]],
+            'MinorAxisLength.Energy.Prcnt90': [nucdiv_features['MinorAxisLength.Energy.Prcnt90'].values[0]],
+            'Area.DiffAvg.Prcnt10': [nucdiv_features['Area.DiffAvg.Prcnt10'].values[0]],
+            'X341': [spatil_features['feature_342'].values[0]],
+            'X51': [spatil_features['feature_52'].values[0]]
+        })
+
+        temp_features = self.patient_output_dir / "temp_features.csv"
+        patient_features.to_csv(temp_features, index=False)
+
+        cmd = [
+            sys.executable, "src/predict_biomarker.py",
+            "--features", str(temp_features),
+            "--training_data", APICPipeline.DEFAULT_CONFIG['cox_model']['training_data_path'],
+            "--output", str(prediction_output)
+        ]
+
+        run_subprocess(cmd, "Cox model prediction")
+        temp_features.unlink()
+
+        prediction = pd.read_csv(prediction_output)
+        risk_group = prediction['risk_group'].values[0]
+        risk_score = prediction['risk_score'].values[0]
+
+        log_step_complete("Patient biomarker prediction", time.time() - start)
+        logger.info(f"Result: {risk_group} (risk score: {risk_score:.3f})")
+
+    def select_representative_overlay(self):
+        """Select overlay from slide with largest tissue area."""
+        log_step_header("Patient Tissue Overlay", "P3")
+        start = time.time()
+
+        overlay_output = self.dirs['qc'] / f"{self.patient_id}_tissue_overlay.png"
+
+        if overlay_output.exists():
+            logger.info("Already complete: overlay exists")
+            return
+
+        # Find slide with largest tissue area
+        best_slide = None
+        best_area = -1.0
+
+        for slide_dir in self.slide_dirs:
+            area = self._get_tissue_area(slide_dir)
+            logger.info(f"  {slide_dir.name}: tissue area = {area:.0f}")
+            if area > best_area:
+                best_area = area
+                best_slide = slide_dir
+
+        if best_slide:
+            source_overlay = best_slide / "qc" / f"{best_slide.name}_tissue_overlay.png"
+            if source_overlay.exists():
+                shutil.copy2(source_overlay, overlay_output)
+                logger.info(f"  Selected overlay from: {best_slide.name} (largest tissue area)")
+            else:
+                logger.warning(f"Overlay not found for best slide: {best_slide.name}")
+        else:
+            logger.warning("No slides found with valid tissue area")
+
+        log_step_complete("Patient overlay", time.time() - start)
+
+    def copy_visualizations(self):
+        """Copy spaTIL visualizations from slides to patient directory."""
+        log_step_header("Patient Visualizations", "P4")
+
+        # Collect visualizations from all slides, pick representative ones
+        all_viz = []
+        for slide_dir in self.slide_dirs:
+            viz_dir = slide_dir / "spatil_visualizations" / slide_dir.name
+            if viz_dir.exists():
+                all_viz.extend(list(viz_dir.glob("*.png")))
+
+        # Copy first 4 visualizations to patient viz directory
+        for i, viz_path in enumerate(all_viz[:4]):
+            dest = self.dirs['spatil_viz'] / f"viz_{i:02d}.png"
+            shutil.copy2(viz_path, dest)
+            logger.info(f"  Copied: {viz_path.name} -> {dest.name}")
+
+        if not all_viz:
+            logger.warning("No visualizations found to copy")
+
+    def build_report(self):
+        """Generate APIC PDF report for patient."""
+        log_step_header("Patient APIC Report Generation", "P5")
+        start = time.time()
+
+        cmd = [
+            sys.executable, "src/build_apic_report_final.py",
+            "--results-root", str(self.output_dir),
+            "--page1-template-pos", "data/HUG-REPORT-EMPTY-POSITIVE.pdf",
+            "--page1-template-neg", "data/HUG-REPORT-EMPTY-NEGATIVE.pdf",
+            "--page2-template", "data/HUG_report.pdf",
+            "--out-dir", str(self.output_dir / "reports"),
+            "--patient", self.patient_id,
+        ]
+
+        run_subprocess(cmd, "APIC report builder")
+
+        log_step_complete("Patient APIC report", time.time() - start)
+
+    def run(self):
+        """Run patient-level aggregation pipeline."""
+        logger.info("=" * 60)
+        logger.info(f"PATIENT PIPELINE - {self.patient_id}")
+        logger.info(f"Slides: {len(self.slide_dirs)}")
+        logger.info("=" * 60)
+
+        pipeline_start = time.time()
+
+        self.aggregate_patient_features()
+        self.predict_biomarker()
+        self.select_representative_overlay()
+        self.copy_visualizations()
+        self.build_report()
+
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("PATIENT PIPELINE COMPLETE")
+        logger.info(f"Patient ID: {self.patient_id}")
+        logger.info(f"Total time: {(time.time() - pipeline_start)/60:.1f} minutes")
+        logger.info("=" * 60)
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -702,29 +947,65 @@ Steps:
   overlay    - Create tissue overlay visualization
   report     - Generate APIC PDF report
 
+Patient Mode (multi-slide):
+  --patient-aggregate  - Run patient-level aggregation across multiple slides
+  --patient-id         - Patient identifier (folder name)
+  --patient-folder     - Folder containing patient's slides
+
 Example:
-  python pipeline_step3_8_rest.py -i /data/slide.ndpi -o /data/output
-  python pipeline_step3_8_rest.py -i /data/slide.ndpi -o /data/output --steps nuclei spatil
+  python feature_extraction_prediction.py -i /data/slide.ndpi -o /data/output
+  python feature_extraction_prediction.py -i /data/slide.ndpi -o /data/output --steps nuclei spatil
+  python feature_extraction_prediction.py --patient-aggregate --patient-id PT001 --patient-folder /data/PT001 -o /data/output
         """
     )
-    parser.add_argument("-i", "--input", required=True, help="Input slide file")
+    parser.add_argument("-i", "--input", help="Input slide file")
     parser.add_argument("-o", "--output", required=True, help="Output directory")
     parser.add_argument("--steps", nargs='+', help="Steps to run (default: all)")
 
+    # Patient mode arguments
+    parser.add_argument("--patient-aggregate", action="store_true",
+                       help="Run patient-level aggregation (multi-slide mode)")
+    parser.add_argument("--patient-id", help="Patient identifier for multi-slide mode")
+    parser.add_argument("--patient-folder", help="Folder containing patient's slides")
+
     args = parser.parse_args()
 
-    if not os.path.exists(args.input):
-        logger.error(f"Input not found: {args.input}")
-        sys.exit(1)
+    # Patient aggregation mode
+    if args.patient_aggregate:
+        if not args.patient_id or not args.patient_folder:
+            logger.error("Patient mode requires --patient-id and --patient-folder")
+            sys.exit(1)
 
-    try:
-        pipeline = APICPipeline(args.input, args.output)
-        pipeline.run(args.steps)
-    except Exception as e:
-        logger.error(f"Pipeline failed: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        try:
+            pipeline = APICPatientPipeline(
+                args.patient_id,
+                args.patient_folder,
+                args.output
+            )
+            pipeline.run()
+        except Exception as e:
+            logger.error(f"Patient pipeline failed: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+    else:
+        # Standard single-slide mode
+        if not args.input:
+            logger.error("Single-slide mode requires -i/--input")
+            sys.exit(1)
+
+        if not os.path.exists(args.input):
+            logger.error(f"Input not found: {args.input}")
+            sys.exit(1)
+
+        try:
+            pipeline = APICPipeline(args.input, args.output)
+            pipeline.run(args.steps)
+        except Exception as e:
+            logger.error(f"Pipeline failed: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
 
 if __name__ == "__main__":

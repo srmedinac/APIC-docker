@@ -27,7 +27,7 @@ For patients with localized high-risk or metastatic hormone-sensitive prostate c
 docker pull madabhushilabapic/apic:latest
 ```
 
-### Run the Pipeline
+### Run the Pipeline (Single Slide)
 
 ```bash
 docker run --gpus all \
@@ -39,6 +39,8 @@ docker run --gpus all \
 ```
 
 > **Note:** GPU is optional. If unavailable, the pipeline automatically falls back to CPU execution.
+
+See [Run Modes](#run-modes) below for batch processing and multi-slide patient options.
 
 ---
 
@@ -139,16 +141,117 @@ For each patient, the pipeline generates a PDF report containing:
 
 ---
 
-## Limitations
+## Run Modes
 
-- Currently accepts **one slide per patient**
-- In batch mode, each slide is treated as a separate patient
+The pipeline supports four different run modes depending on your input structure:
 
-### Planned Improvements
+### 1. Single Slide Mode
 
-- Support for multiple slides per patient
-- Aggregation of features across slides
-- Single patient-level summary from multiple biopsies
+Process one slide as one patient.
+
+```bash
+docker run --gpus all \
+  -v /path/to/slides:/data/input_slides:ro \
+  -v /path/to/output:/data/output \
+  madabhushilabapic/apic:latest \
+  -i "/data/input_slides/slide.svs" \
+  -o /data/output
+```
+
+### 2. Batch Mode (Multiple Patients, One Slide Each)
+
+Process a folder of slides where **each slide is a different patient**.
+
+```bash
+docker run --gpus all \
+  -v /path/to/slides_folder:/data/input_slides:ro \
+  -v /path/to/output:/data/output \
+  madabhushilabapic/apic:latest \
+  -i "/data/input_slides/" \
+  -o /data/output
+```
+
+**Input structure:**
+```
+/path/to/slides_folder/
+  ├── patient1_slide.svs    → Patient 1
+  ├── patient2_slide.svs    → Patient 2
+  └── patient3_slide.svs    → Patient 3
+```
+
+### 3. Multi-Slide Mode (One Patient, Multiple Slides)
+
+Process multiple slides from **a single patient**. Features are averaged across all slides to generate one patient-level prediction.
+
+```bash
+docker run --gpus all \
+  -v /path/to/patient_folder:/data/input_slides:ro \
+  -v /path/to/output:/data/output \
+  madabhushilabapic/apic:latest \
+  -i "/data/input_slides/" \
+  -o /data/output \
+  --multi-slide
+```
+
+**Input structure:**
+```
+/path/to/patient_folder/        → Patient PT001
+  ├── biopsy_core_1.svs
+  ├── biopsy_core_2.svs
+  └── biopsy_core_3.svs
+```
+
+**Output:** One aggregated prediction and report for the patient (folder name = patient ID).
+
+### 4. Batch Multi-Slide Mode (Multiple Patients, Multiple Slides Each)
+
+Process multiple patients where **each patient has multiple slides**. Each subfolder is treated as a separate patient.
+
+```bash
+docker run --gpus all \
+  -v /path/to/patients_folder:/data/input_slides:ro \
+  -v /path/to/output:/data/output \
+  madabhushilabapic/apic:latest \
+  -i "/data/input_slides/" \
+  -o /data/output \
+  --multi-slide
+```
+
+**Input structure:**
+```
+/path/to/patients_folder/
+  ├── PT001/                    → Patient PT001
+  │   ├── biopsy_core_1.svs
+  │   └── biopsy_core_2.svs
+  ├── PT002/                    → Patient PT002
+  │   ├── biopsy_core_1.svs
+  │   ├── biopsy_core_2.svs
+  │   └── biopsy_core_3.svs
+  └── PT003/                    → Patient PT003
+      └── biopsy_core_1.svs
+```
+
+**Output:** One aggregated prediction and report per patient.
+
+### Mode Selection Summary
+
+| Mode | Input | Flag | Description |
+|------|-------|------|-------------|
+| Single slide | File path | (none) | One slide = one patient |
+| Batch | Folder with slides | (none) | Each slide = different patient |
+| Multi-slide | Folder with slides | `--multi-slide` | All slides = one patient |
+| Batch multi-slide | Folder with subfolders | `--multi-slide` | Each subfolder = one patient |
+
+> **Auto-detection:** When using `--multi-slide`, the pipeline automatically detects whether the input folder contains slides directly (single patient) or subfolders (batch of patients).
+
+### Multi-Slide Feature Aggregation
+
+When processing multiple slides per patient:
+
+1. Each slide is processed independently through feature extraction
+2. Features from all slides are **averaged using nanmean** (ignoring missing values)
+3. The tissue overlay in the report comes from the slide with the **largest tissue area**
+4. A single prediction and PDF report is generated per patient
 
 ---
 
