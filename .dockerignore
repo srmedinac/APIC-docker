@@ -34,3 +34,6 @@ conftest.py
 
 # Claude/editor files
 .claude/
+
+# Build scripts
+build_and_push.sh
