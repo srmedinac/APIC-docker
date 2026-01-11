@@ -5,6 +5,7 @@ INPUT_SLIDE=""
 OUTPUT_DIR=""
 MULTI_SLIDE=false
 RESUME=false
+PATIENT_ID=""
 
 # Timing variables for ETA calculation
 declare -a SLIDE_TIMES=()
@@ -71,6 +72,10 @@ while [[ $# -gt 0 ]]; do
       RESUME=true
       shift
       ;;
+    --patient-id)
+      PATIENT_ID="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown argument: $1"
       exit 1
@@ -79,16 +84,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${INPUT_SLIDE}" || -z "${OUTPUT_DIR}" ]]; then
-  echo "Usage: $0 -i <input_slide> -o <output_dir> [--multi-slide] [--resume]"
+  echo "Usage: $0 -i <input_slide> -o <output_dir> [--multi-slide] [--patient-id <id>] [--resume]"
   echo ""
   echo "Options:"
   echo "  --resume            Skip already-processed slides"
+  echo "  --patient-id <id>   Patient identifier for multi-slide mode (required for single-patient multi-slide)"
   echo ""
   echo "Modes:"
   echo "  Single slide:       -i /path/to/slide.svs -o /output"
   echo "  Batch mode:         -i /path/to/slides_dir/ -o /output"
   echo "                      (Each slide = different patient)"
-  echo "  Multi-slide:        -i /path/to/patient_dir/ -o /output --multi-slide"
+  echo "  Multi-slide:        -i /path/to/patient_dir/ -o /output --multi-slide --patient-id PT001"
   echo "                      (All slides in folder = one patient, features averaged)"
   echo "  Batch multi-slide:  -i /path/to/patients_dir/ -o /output --multi-slide"
   echo "                      (Each subfolder = one patient with multiple slides)"
@@ -155,7 +161,15 @@ run_one () {
 
 process_patient_folder () {
   local PATIENT_FOLDER="$1"
-  local PATIENT_ID=$(basename "${PATIENT_FOLDER}")
+  local PATIENT_ID_OVERRIDE="${2:-}"
+
+  # Use override if provided, otherwise use folder basename
+  local PATIENT_ID
+  if [[ -n "$PATIENT_ID_OVERRIDE" ]]; then
+    PATIENT_ID="$PATIENT_ID_OVERRIDE"
+  else
+    PATIENT_ID=$(basename "${PATIENT_FOLDER}")
+  fi
 
   echo ""
   echo "  Patient: $PATIENT_ID"
@@ -178,7 +192,7 @@ process_patient_folder () {
 
   echo "  Found $SLIDE_COUNT slide(s)"
 
-  # Process each slide
+  # Process each slide (include overlay step for patient-level report)
   local CURRENT=0
   shopt -s nullglob
   for ext in "${SUPPORTED_EXTS[@]}"; do
@@ -186,7 +200,7 @@ process_patient_folder () {
       ((CURRENT++)) || true
       echo ""
       echo "    Slide $CURRENT/$SLIDE_COUNT: $(basename "$f")"
-      run_one "$f" "nuclei spatil nucdiv aggregate"
+      run_one "$f" "nuclei spatil nucdiv aggregate overlay"
     done
   done
   shopt -u nullglob
@@ -231,8 +245,16 @@ if [[ "${MULTI_SLIDE}" == "true" ]] && [[ -d "${INPUT_SLIDE}" ]]; then
   shopt -u nullglob
 
   if [[ $DIRECT_SLIDE_COUNT -gt 0 ]]; then
+    # Single patient with multiple slides - require --patient-id
+    if [[ -z "$PATIENT_ID" ]]; then
+      echo "ERROR: --patient-id is required for single-patient multi-slide mode"
+      echo ""
+      echo "Example: $0 -i /data/input_slides/ -o /output --multi-slide --patient-id PT001"
+      exit 1
+    fi
     echo "Mode: Multi-slide (single patient)"
-    process_patient_folder "${INPUT_SLIDE}"
+    echo "Patient ID: $PATIENT_ID"
+    process_patient_folder "${INPUT_SLIDE}" "$PATIENT_ID"
   else
     echo "Mode: Batch Multi-slide"
 

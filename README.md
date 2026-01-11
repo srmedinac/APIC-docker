@@ -190,18 +190,22 @@ docker run --gpus all \
   madabhushilabapic/apic:latest \
   -i "/data/input_slides/" \
   -o /data/output \
-  --multi-slide
+  --multi-slide \
+  --patient-id Patient001
 ```
 
+> **Note:** `--patient-id` is required for single-patient multi-slide mode. This sets the patient identifier used in output files and the report.
+
 **Input structure:**
-```
-/path/to/patient_folder/        → Patient PT001
+
+```text
+/path/to/patient_folder/        → Mounted as /data/input_slides
   ├── biopsy_core_1.svs
   ├── biopsy_core_2.svs
   └── biopsy_core_3.svs
 ```
 
-**Output:** One aggregated prediction and report for the patient (folder name = patient ID).
+**Output:** `Patient001_report.pdf` with aggregated prediction.
 
 ### 4. Batch Multi-Slide Mode (Multiple Patients, Multiple Slides Each)
 
@@ -235,20 +239,21 @@ docker run --gpus all \
 
 ### Mode Selection Summary
 
-| Mode | Input | Flag | Description |
-|------|-------|------|-------------|
-| Single slide | File path | (none) | One slide = one patient |
-| Batch | Folder with slides | (none) | Each slide = different patient |
-| Multi-slide | Folder with slides | `--multi-slide` | All slides = one patient |
-| Batch multi-slide | Folder with subfolders | `--multi-slide` | Each subfolder = one patient |
+| Mode              | Input                  | Flags                            | Description                    |
+|-------------------|------------------------|----------------------------------|--------------------------------|
+| Single slide      | File path              | (none)                           | One slide = one patient        |
+| Batch             | Folder with slides     | (none)                           | Each slide = different patient |
+| Multi-slide       | Folder with slides     | `--multi-slide --patient-id`    | All slides = one patient       |
+| Batch multi-slide | Folder with subfolders | `--multi-slide`                  | Each subfolder = one patient   |
 
-> **Auto-detection:** When using `--multi-slide`, the pipeline automatically detects whether the input folder contains slides directly (single patient) or subfolders (batch of patients).
+> **Auto-detection:** When using `--multi-slide`, the pipeline automatically detects whether the input folder contains slides directly (single patient, requires `--patient-id`) or subfolders (batch of patients, uses subfolder names as patient IDs).
 
 ### Additional Options
 
-| Flag       | Description                                                              |
-|------------|--------------------------------------------------------------------------|
-| `--resume` | Skip already-processed slides. Useful for resuming interrupted batch jobs. |
+| Flag              | Description                                                                  |
+|-------------------|------------------------------------------------------------------------------|
+| `--resume`        | Skip already-processed slides. Useful for resuming interrupted batch jobs.  |
+| `--patient-id`    | Patient identifier for single-patient multi-slide mode (required).          |
 
 **Example with resume:**
 
@@ -273,40 +278,46 @@ When processing multiple slides per patient:
 
 ### Patient ID and Report Naming
 
-The patient ID (and report filename) is determined by the **folder name**:
+The patient ID (and report filename) is determined as follows:
 
-| Mode              | Patient ID Source     | Report Name                    |
-|-------------------|-----------------------|--------------------------------|
-| Single slide      | Slide filename (stem) | `{slide_name}_report.pdf`      |
-| Batch             | Each slide filename   | `{slide_name}_report.pdf`      |
-| Multi-slide       | Input folder name     | `{folder_name}_report.pdf`     |
-| Batch multi-slide | Each subfolder name   | `{subfolder_name}_report.pdf`  |
+| Mode              | Patient ID Source       | Report Name                     |
+|-------------------|-------------------------|---------------------------------|
+| Single slide      | Slide filename (stem)   | `{slide_name}_report.pdf`       |
+| Batch             | Each slide filename     | `{slide_name}_report.pdf`       |
+| Multi-slide       | `--patient-id` flag     | `{patient_id}_report.pdf`       |
+| Batch multi-slide | Each subfolder name     | `{subfolder_name}_report.pdf`   |
 
-**Example for multi-slide:**
+**Example for multi-slide (single patient):**
 
 ```text
-# If your folder structure is:
-/data/PT77/
-  ├── slide1.svs
-  └── slide2.svs
+# Your local folder:
+/home/user/PatientA/
+  ├── biopsy_1.svs
+  └── biopsy_2.svs
 
-# Running with: -i /data/PT77/ --multi-slide
-# Produces: PT77_report.pdf
+# Docker command:
+docker run ... -v /home/user/PatientA:/data/input_slides:ro \
+  -i /data/input_slides/ --multi-slide --patient-id PatientA
+
+# Output: PatientA_report.pdf
 ```
 
-**Example for batch multi-slide:**
+**Example for batch multi-slide (multiple patients):**
 
 ```text
-# If your folder structure is:
-/data/patients/
-  ├── PT77/
-  │   ├── slide1.svs
-  │   └── slide2.svs
-  └── PT78/
-      └── slide1.svs
+# Your local folder structure:
+/home/user/patients/
+  ├── PatientA/
+  │   ├── biopsy_1.svs
+  │   └── biopsy_2.svs
+  └── PatientB/
+      └── biopsy_1.svs
 
-# Running with: -i /data/patients/ --multi-slide
-# Produces: PT77_report.pdf, PT78_report.pdf
+# Docker command:
+docker run ... -v /home/user/patients:/data/input_slides:ro \
+  -i /data/input_slides/ --multi-slide
+
+# Output: PatientA_report.pdf, PatientB_report.pdf
 ```
 
 > **Important:** Name your patient folders with the desired patient ID. The folder name becomes the patient identifier in all outputs.
@@ -358,6 +369,23 @@ The test suite validates pipeline behavior without requiring model inference:
 | `test_feature_aggregation.py` | Feature averaging with NaN handling |
 
 Tests run in ~10 seconds using dummy data. They are excluded from the Docker image via `.dockerignore`.
+
+### Building and Pushing to Docker Hub
+
+To build and push a new version to Docker Hub:
+
+```bash
+./build_and_push.sh
+```
+
+This script will:
+
+1. Prompt for a version number (e.g., `1.0.7`)
+2. Build the image as `madabhushilabapic/apic:v1.0.7`
+3. Tag it as `madabhushilabapic/apic:latest`
+4. Push both tags to Docker Hub
+
+> **Note:** Requires Docker Hub login (`docker login`) and push access to the repository.
 
 ---
 
