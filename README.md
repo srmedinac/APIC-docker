@@ -273,6 +273,54 @@ When processing multiple slides per patient:
 
 ---
 
+## Contributing
+
+### Development Workflow
+
+1. **Create a branch**
+   ```bash
+   git checkout main
+   git pull origin main
+   git checkout -b feature/your-feature-name
+   ```
+
+2. **Make your changes**
+
+3. **Run tests**
+   ```bash
+   pytest tests/ -v
+   ```
+   All 98 tests must pass before pushing.
+
+4. **Commit**
+   ```bash
+   git add .
+   git commit -m "Description of your changes"
+   ```
+
+5. **Push and create PR**
+   ```bash
+   git push -u origin feature/your-feature-name
+   ```
+   Then create a Pull Request on GitHub.
+
+### Test Suite
+
+The test suite validates pipeline behavior without requiring model inference:
+
+| Test File | Coverage |
+|-----------|----------|
+| `test_modes.py` | Mode detection (single, batch, multi-slide, resume) |
+| `test_patient_pipeline.py` | Multi-slide aggregation |
+| `test_step_interfaces.py` | Step input/output contracts |
+| `test_pipeline_integration.py` | End-to-end data flow |
+| `test_symlink_handling.py` | Resume after interruption |
+| `test_feature_aggregation.py` | Feature averaging with NaN handling |
+
+Tests run in ~10 seconds using dummy data. They are excluded from the Docker image via `.dockerignore`.
+
+---
+
 ## Citation
 
 If you use this pipeline in your research, please cite:

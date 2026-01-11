@@ -19,6 +19,8 @@ __pycache__/
 tests/
 test_*.py
 *_test.py
+pytest.ini
+conftest.py
 
 # Temporary files
 *.tmp
