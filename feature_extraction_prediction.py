@@ -253,8 +253,11 @@ class APICPipeline:
         logger.info(f"Processing {len(unprocessed)}/{len(patch_files)} patches")
 
         # Create temp directory with symlinks to unprocessed patches
+        # Clean any existing temp directory to remove stale symlinks from previous runs
         temp_dir = self.slide_output_dir / "temp_unprocessed_patches"
-        temp_dir.mkdir(exist_ok=True)
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        temp_dir.mkdir(parents=True, exist_ok=True)
 
         for patch in unprocessed:
             link = temp_dir / patch.name
