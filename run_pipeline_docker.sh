@@ -6,6 +6,7 @@ OUTPUT_DIR=""
 MULTI_SLIDE=false
 RESUME=false
 PATIENT_ID=""
+RESEARCH_MODE=false
 
 # Timing variables for ETA calculation
 declare -a SLIDE_TIMES=()
@@ -76,6 +77,10 @@ while [[ $# -gt 0 ]]; do
       PATIENT_ID="$2"
       shift 2
       ;;
+    --research-mode)
+      RESEARCH_MODE=true
+      shift
+      ;;
     *)
       echo "Unknown argument: $1"
       exit 1
@@ -84,11 +89,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${INPUT_SLIDE}" || -z "${OUTPUT_DIR}" ]]; then
-  echo "Usage: $0 -i <input_slide> -o <output_dir> [--multi-slide] [--patient-id <id>] [--resume]"
+  echo "Usage: $0 -i <input_slide> -o <output_dir> [--multi-slide] [--patient-id <id>] [--resume] [--research-mode]"
   echo ""
   echo "Options:"
   echo "  --resume            Skip already-processed slides"
   echo "  --patient-id <id>   Patient identifier for multi-slide mode (required for single-patient multi-slide)"
+  echo "  --research-mode     Research mode: auto-group slides by patient ID from filename"
   echo ""
   echo "Modes:"
   echo "  Single slide:       -i /path/to/slide.svs -o /output"
@@ -98,6 +104,8 @@ if [[ -z "${INPUT_SLIDE}" || -z "${OUTPUT_DIR}" ]]; then
   echo "                      (All slides in folder = one patient, features averaged)"
   echo "  Batch multi-slide:  -i /path/to/patients_dir/ -o /output --multi-slide"
   echo "                      (Each subfolder = one patient with multiple slides)"
+  echo "  Research mode:      -i /path/to/slides_dir/ -o /output --research-mode"
+  echo "                      (Slides auto-grouped by patient ID from filename, outputs CSV)"
   exit 1
 fi
 
@@ -286,6 +294,55 @@ if [[ "${MULTI_SLIDE}" == "true" ]] && [[ -d "${INPUT_SLIDE}" ]]; then
       fi
     done
   fi
+
+elif [[ "${RESEARCH_MODE}" == "true" ]] && [[ -d "${INPUT_SLIDE}" ]]; then
+  echo "Mode: Research (batch with auto-grouping by patient ID)"
+  echo "Patient IDs will be extracted from filenames (number before first underscore)"
+
+  # Count slides
+  COUNT=0
+  shopt -s nullglob
+  for ext in "${SUPPORTED_EXTS[@]}"; do
+    for f in "${INPUT_SLIDE}"/*.${ext}; do
+      ((COUNT++)) || true
+    done
+  done
+  shopt -u nullglob
+
+  if [[ $COUNT -eq 0 ]]; then
+    echo "ERROR: No supported WSI files found in: ${INPUT_SLIDE}"
+    echo "Supported formats: ${SUPPORTED_EXTS[*]}"
+    exit 1
+  fi
+
+  echo "Found $COUNT slide(s) to process"
+  echo ""
+
+  # Phase 1: Process all slides without report generation
+  CURRENT=0
+  shopt -s nullglob
+  for ext in "${SUPPORTED_EXTS[@]}"; do
+    for f in "${INPUT_SLIDE}"/*.${ext}; do
+      ((CURRENT++)) || true
+      echo ""
+      echo "============================================================"
+      echo "  Slide $CURRENT of $COUNT"
+      echo "============================================================"
+      run_one "$f" "nuclei spatil nucdiv aggregate predict overlay"
+      print_eta "$CURRENT" "$COUNT"
+    done
+  done
+  shopt -u nullglob
+
+  # Phase 2: Research aggregation - group by patient ID and generate summary CSV
+  echo ""
+  echo "============================================================"
+  echo "  Research Mode: Patient Aggregation"
+  echo "============================================================"
+  conda run --no-capture-output -n apic_env python -u /app/feature_extraction_prediction.py \
+    --research-aggregate \
+    --input-dir "${INPUT_SLIDE}" \
+    -o "$OUTPUT_DIR"
 
 elif [[ -d "${INPUT_SLIDE}" ]]; then
   echo "Mode: Batch (directory)"

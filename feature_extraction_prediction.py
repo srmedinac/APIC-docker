@@ -15,6 +15,7 @@ import os
 import sys
 import argparse
 import logging
+import re
 import subprocess
 import shutil
 import time
@@ -136,6 +137,27 @@ def generate_nucdiv_column_names():
         for haralick in HARALICK_FEATURES
         for stat in STAT_NAMES
     ]
+
+
+def extract_patient_id_from_filename(filename: str) -> str:
+    """
+    Extract patient ID from slide filename.
+
+    Pattern: number before first underscore.
+
+    Examples:
+        "91_PT9-100933-00-R00_110928.svs" -> "91"
+        "541_PT9-100935-00-R00_120515.svs" -> "541"
+
+    Args:
+        filename: Slide filename (with or without path/extension)
+
+    Returns:
+        Patient ID string, or None if pattern doesn't match
+    """
+    name = Path(filename).stem
+    match = re.match(r'^(\d+)_', name)
+    return match.group(1) if match else None
 
 
 def convert_mat_to_csv(mat_path: Path, csv_path: Path, slide_name: str):
@@ -923,6 +945,310 @@ class APICPatientPipeline:
         logger.info("=" * 60)
 
 
+class APICResearchPipeline:
+    """
+    APIC Research Mode Pipeline.
+
+    Processes a directory of slides, groups them by patient ID extracted from
+    filenames, aggregates features per patient, and generates a summary CSV.
+
+    Patient ID is extracted as the number before the first underscore in filename.
+    Example: "91_PT9-100933-00-R00_110928.svs" -> patient_id = "91"
+    """
+
+    RESEARCH_COLUMNS = [
+        'patient_id', 'Area.Energy.var', 'Area.InvDiffMom.Skewness',
+        'MinorAxisLength.Energy.Prcnt90', 'Area.DiffAvg.Prcnt10',
+        'X341', 'X51', 'risk_score', 'risk_group'
+    ]
+
+    def __init__(self, input_dir: str, output_dir: str, config: dict = None):
+        """
+        Initialize research pipeline.
+
+        Args:
+            input_dir: Directory containing slide files
+            output_dir: Root output directory
+            config: Optional configuration override
+        """
+        self.input_dir = Path(input_dir).resolve()
+        self.output_dir = Path(output_dir).resolve()
+        self.config = config or APICPipeline.DEFAULT_CONFIG
+        self.invalid_slides = []
+        self.patient_groups = self._discover_and_group_slides()
+
+        logger.info(f"Research pipeline initialized")
+        logger.info(f"Input: {self.input_dir}")
+        logger.info(f"Found {len(self.patient_groups)} patients")
+
+    def _discover_and_group_slides(self) -> dict:
+        """
+        Discover all slides in input directory and group by patient ID.
+
+        Returns:
+            Dictionary mapping patient_id -> list of slide names (without extension)
+        """
+        supported_exts = ['svs', 'tif', 'tiff', 'ndpi', 'mrxs', 'scn']
+        patient_groups = {}
+
+        for ext in supported_exts:
+            for slide_path in self.input_dir.glob(f"*.{ext}"):
+                filename = slide_path.name
+                patient_id = extract_patient_id_from_filename(filename)
+
+                if patient_id is None:
+                    self.invalid_slides.append(filename)
+                    logger.warning(f"Cannot extract patient ID from: {filename}")
+                    continue
+
+                slide_name = slide_path.stem
+
+                if patient_id not in patient_groups:
+                    patient_groups[patient_id] = []
+                patient_groups[patient_id].append(slide_name)
+
+        # Sort patient IDs numerically
+        return dict(sorted(patient_groups.items(), key=lambda x: int(x[0])))
+
+    def _get_slide_output_dir(self, slide_name: str) -> Path:
+        """Get the output directory for a processed slide."""
+        return self.output_dir / slide_name
+
+    def _aggregate_patient_features(self, patient_id: str, slide_names: list) -> dict:
+        """
+        Aggregate features across all slides for a patient.
+
+        Args:
+            patient_id: Patient identifier
+            slide_names: List of slide names for this patient
+
+        Returns:
+            Dictionary with patient features, or None if aggregation fails
+        """
+        all_spatil = []
+        all_nucdiv = []
+        spatil_columns = None
+        nucdiv_columns = None
+
+        for slide_name in slide_names:
+            slide_dir = self._get_slide_output_dir(slide_name)
+
+            # Load spaTIL features
+            spatil_file = slide_dir / "final_features" / f"{slide_name}_spatil_aggregated.csv"
+            if spatil_file.exists():
+                df = pd.read_csv(spatil_file)
+                spatil_columns = df.columns
+                all_spatil.append(df.values[0])
+            else:
+                logger.warning(f"Missing spaTIL for {slide_name}")
+
+            # Load nucdiv features
+            nucdiv_file = slide_dir / "final_features" / f"{slide_name}_nucdiv.csv"
+            if nucdiv_file.exists():
+                df = pd.read_csv(nucdiv_file)
+                numeric_df = df.select_dtypes(include=[np.number])
+                nucdiv_columns = numeric_df.columns
+                all_nucdiv.append(numeric_df.values[0])
+            else:
+                logger.warning(f"Missing nucdiv for {slide_name}")
+
+        if not all_spatil or not all_nucdiv:
+            logger.error(f"Patient {patient_id}: insufficient features for aggregation")
+            return None
+
+        # Average features using nanmean
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            mean_spatil = np.nanmean(np.vstack(all_spatil), axis=0)
+            mean_nucdiv = np.nanmean(np.vstack(all_nucdiv), axis=0)
+
+        # Create DataFrames for prediction
+        spatil_df = pd.DataFrame([mean_spatil], columns=spatil_columns)
+        nucdiv_df = pd.DataFrame([mean_nucdiv], columns=nucdiv_columns)
+
+        return {
+            'spatil_df': spatil_df,
+            'nucdiv_df': nucdiv_df,
+            'num_slides': len(slide_names)
+        }
+
+    def _run_prediction(self, patient_id: str, spatil_df: pd.DataFrame,
+                        nucdiv_df: pd.DataFrame) -> dict:
+        """
+        Run Cox model prediction for a patient.
+
+        Returns dict with prediction results or None on failure.
+        """
+        # Create patient output directory
+        patient_dir = self.output_dir / patient_id
+        patient_dir.mkdir(parents=True, exist_ok=True)
+        final_dir = patient_dir / "final_features"
+        final_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save aggregated features
+        spatil_df.to_csv(final_dir / f"{patient_id}_spatil_aggregated.csv", index=False)
+        nucdiv_df.to_csv(final_dir / f"{patient_id}_nucdiv.csv", index=False)
+
+        # Build features for Cox model
+        try:
+            patient_features = pd.DataFrame({
+                'patient_id': [patient_id],
+                'Area.Energy.var': [nucdiv_df['Area.Energy.var'].values[0]],
+                'Area.InvDiffMom.Skewness': [nucdiv_df['Area.InvDiffMom.Skewness'].values[0]],
+                'MinorAxisLength.Energy.Prcnt90': [nucdiv_df['MinorAxisLength.Energy.Prcnt90'].values[0]],
+                'Area.DiffAvg.Prcnt10': [nucdiv_df['Area.DiffAvg.Prcnt10'].values[0]],
+                'X341': [spatil_df['feature_342'].values[0]],
+                'X51': [spatil_df['feature_52'].values[0]]
+            })
+        except KeyError as e:
+            logger.error(f"Patient {patient_id}: missing required feature {e}")
+            return None
+
+        # Save temp features and run prediction
+        temp_features = patient_dir / "temp_features.csv"
+        prediction_output = final_dir / f"{patient_id}_prediction.csv"
+
+        patient_features.to_csv(temp_features, index=False)
+
+        cmd = [
+            sys.executable, "src/predict_biomarker.py",
+            "--features", str(temp_features),
+            "--training_data", self.config['cox_model']['training_data_path'],
+            "--output", str(prediction_output)
+        ]
+
+        try:
+            run_subprocess(cmd, f"Cox model prediction for {patient_id}")
+            temp_features.unlink()
+
+            # Read prediction results
+            pred_df = pd.read_csv(prediction_output)
+
+            return {
+                'patient_id': patient_id,
+                'Area.Energy.var': patient_features['Area.Energy.var'].values[0],
+                'Area.InvDiffMom.Skewness': patient_features['Area.InvDiffMom.Skewness'].values[0],
+                'MinorAxisLength.Energy.Prcnt90': patient_features['MinorAxisLength.Energy.Prcnt90'].values[0],
+                'Area.DiffAvg.Prcnt10': patient_features['Area.DiffAvg.Prcnt10'].values[0],
+                'X341': patient_features['X341'].values[0],
+                'X51': patient_features['X51'].values[0],
+                'risk_score': pred_df['risk_score'].values[0],
+                'risk_group': pred_df['risk_group'].values[0]
+            }
+        except Exception as e:
+            logger.error(f"Prediction failed for {patient_id}: {e}")
+            if temp_features.exists():
+                temp_features.unlink()
+            return None
+
+    def _copy_patient_overlay(self, patient_id: str, slide_names: list):
+        """Copy the first available overlay to patient directory."""
+        patient_qc = self.output_dir / patient_id / "qc"
+        patient_qc.mkdir(parents=True, exist_ok=True)
+
+        overlay_dest = patient_qc / f"{patient_id}_tissue_overlay.png"
+        if overlay_dest.exists():
+            return
+
+        for slide_name in slide_names:
+            source = self._get_slide_output_dir(slide_name) / "qc" / f"{slide_name}_tissue_overlay.png"
+            if source.exists():
+                shutil.copy2(source, overlay_dest)
+                logger.info(f"  Copied overlay from {slide_name}")
+                return
+
+        logger.warning(f"  No overlay found for patient {patient_id}")
+
+    def run(self):
+        """
+        Run the research pipeline.
+
+        1. Aggregate features for each patient group
+        2. Run predictions
+        3. Generate summary CSV
+        """
+        log_step_header("RESEARCH MODE AGGREGATION")
+        pipeline_start = time.time()
+
+        # Report grouping
+        logger.info("Patient groups:")
+        for patient_id, slides in self.patient_groups.items():
+            logger.info(f"  {patient_id}: {len(slides)} slide(s)")
+
+        if self.invalid_slides:
+            logger.warning(f"Skipped {len(self.invalid_slides)} slides with invalid naming:")
+            for name in self.invalid_slides:
+                logger.warning(f"  - {name}")
+
+        # Process each patient
+        results = []
+        failed_patients = []
+
+        for patient_id, slide_names in self.patient_groups.items():
+            logger.info("")
+            logger.info(f"Processing patient: {patient_id} ({len(slide_names)} slides)")
+
+            # Aggregate features
+            features = self._aggregate_patient_features(patient_id, slide_names)
+            if features is None:
+                failed_patients.append(patient_id)
+                continue
+
+            # Run prediction
+            result = self._run_prediction(
+                patient_id,
+                features['spatil_df'],
+                features['nucdiv_df']
+            )
+
+            if result is None:
+                failed_patients.append(patient_id)
+                continue
+
+            results.append(result)
+
+            # Copy overlay
+            self._copy_patient_overlay(patient_id, slide_names)
+
+            logger.info(f"  Result: {result['risk_group']} (score: {result['risk_score']:.3f})")
+
+        # Generate summary CSV
+        self._write_summary_csv(results)
+
+        # Final summary
+        self._print_summary(results, failed_patients, time.time() - pipeline_start)
+
+    def _write_summary_csv(self, results: list):
+        """Write research_results.csv with all patient results."""
+        output_path = self.output_dir / "research_results.csv"
+
+        if not results:
+            logger.warning("No results to write")
+            return
+
+        df = pd.DataFrame(results, columns=self.RESEARCH_COLUMNS)
+        df.to_csv(output_path, index=False)
+
+        logger.info("")
+        logger.info(f"Summary CSV written: {output_path}")
+        logger.info(f"  {len(results)} patients processed successfully")
+
+    def _print_summary(self, results: list, failed: list, total_time: float):
+        """Print final summary."""
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("RESEARCH MODE COMPLETE")
+        logger.info("=" * 60)
+        logger.info(f"Total patients: {len(self.patient_groups)}")
+        logger.info(f"Successful: {len(results)}")
+        logger.info(f"Failed: {len(failed)}")
+        if failed:
+            logger.info(f"Failed patients: {', '.join(failed)}")
+        logger.info(f"Total time: {total_time/60:.1f} minutes")
+        logger.info(f"Output: {self.output_dir / 'research_results.csv'}")
+        logger.info("=" * 60)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="APIC Pipeline Steps 3-8: Feature Extraction and Biomarker Prediction",
@@ -958,10 +1284,30 @@ Example:
     parser.add_argument("--patient-id", help="Patient identifier for multi-slide mode")
     parser.add_argument("--patient-folder", help="Folder containing patient's slides")
 
+    # Research mode arguments
+    parser.add_argument("--research-aggregate", action="store_true",
+                       help="Run research mode aggregation (groups slides by patient ID from filename)")
+    parser.add_argument("--input-dir", help="Input directory for research mode")
+
     args = parser.parse_args()
 
+    # Research aggregation mode
+    if args.research_aggregate:
+        if not args.input_dir:
+            logger.error("Research mode requires --input-dir")
+            sys.exit(1)
+
+        try:
+            pipeline = APICResearchPipeline(args.input_dir, args.output)
+            pipeline.run()
+        except Exception as e:
+            logger.error(f"Research pipeline failed: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+
     # Patient aggregation mode
-    if args.patient_aggregate:
+    elif args.patient_aggregate:
         if not args.patient_id or not args.patient_folder:
             logger.error("Patient mode requires --patient-id and --patient-folder")
             sys.exit(1)
@@ -978,6 +1324,7 @@ Example:
             import traceback
             traceback.print_exc()
             sys.exit(1)
+
     else:
         # Standard single-slide mode
         if not args.input:

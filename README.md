@@ -237,23 +237,98 @@ docker run --gpus all \
 
 **Output:** One aggregated prediction and report per patient.
 
+### 5. Research Mode (Batch with Auto-Grouping)
+
+Process a flat folder of slides where **patient ID is extracted from the filename**. Slides are automatically grouped by patient ID, features are averaged per patient, and a summary CSV is generated. **No PDF reports are generated** in this mode.
+
+```bash
+docker run --gpus all \
+  -v /path/to/slides_folder:/data/input_slides:ro \
+  -v /path/to/output:/data/output \
+  madabhushilabapic/apic:latest \
+  -i "/data/input_slides/" \
+  -o /data/output \
+  --research-mode
+```
+
+**Patient ID Extraction:**
+
+The patient ID is extracted as the **number before the first underscore** in the filename:
+
+```text
+<patient_id>_<rest_of_filename>.svs
+     ↑
+ Number before first underscore = patient ID
+```
+
+**Examples:**
+
+```text
+001_biopsy_core_A.svs     → patient_id = "001"
+042_sample_tissue.svs     → patient_id = "042"
+042_another_core.svs      → patient_id = "042" (grouped with above)
+```
+
+**Input structure:**
+```
+/path/to/slides_folder/
+  ├── 001_biopsy_core_A.svs       → Patient 001 (1 slide)
+  ├── 042_sample_tissue.svs       → Patient 042 (2 slides)
+  ├── 042_another_core.svs        → Patient 042 (grouped)
+  └── 103_tissue_section.svs      → Patient 103 (1 slide)
+```
+
+**Output:**
+```
+/path/to/output/
+  ├── research_results.csv        ← Summary CSV with all patients
+  ├── 001/                         ← Per-patient aggregated features
+  │   ├── final_features/
+  │   └── qc/
+  ├── 042/
+  │   ├── final_features/
+  │   └── qc/
+  ├── 103/
+  │   ├── final_features/
+  │   └── qc/
+  └── [individual slide outputs]   ← Preserved for each slide
+```
+
+**research_results.csv columns:**
+
+| Column                           | Description                                  |
+| -------------------------------- | -------------------------------------------- |
+| `patient_id`                     | Patient identifier (extracted from filename) |
+| `Area.Energy.var`                | Nuclear diversity feature                    |
+| `Area.InvDiffMom.Skewness`       | Nuclear diversity feature                    |
+| `MinorAxisLength.Energy.Prcnt90` | Nuclear diversity feature                    |
+| `Area.DiffAvg.Prcnt10`           | Nuclear diversity feature                    |
+| `X341`                           | spaTIL spatial feature                       |
+| `X51`                            | spaTIL spatial feature                       |
+| `risk_score`                     | Cox model risk score (numeric)               |
+| `risk_group`                     | "High Risk" or "Low Risk"                    |
+
+> **Note:** Slides that don't match the expected naming pattern (number before first underscore) will be skipped with a warning.
+
 ### Mode Selection Summary
 
-| Mode              | Input                  | Flags                            | Description                    |
-|-------------------|------------------------|----------------------------------|--------------------------------|
-| Single slide      | File path              | (none)                           | One slide = one patient        |
-| Batch             | Folder with slides     | (none)                           | Each slide = different patient |
-| Multi-slide       | Folder with slides     | `--multi-slide --patient-id`    | All slides = one patient       |
-| Batch multi-slide | Folder with subfolders | `--multi-slide`                  | Each subfolder = one patient   |
+| Mode              | Input                  | Flags                         | Description                      |
+| ----------------- | ---------------------- | ----------------------------- | -------------------------------- |
+| Single slide      | File path              | (none)                        | One slide = one patient          |
+| Batch             | Folder with slides     | (none)                        | Each slide = different patient   |
+| Multi-slide       | Folder with slides     | `--multi-slide --patient-id`  | All slides = one patient         |
+| Batch multi-slide | Folder with subfolders | `--multi-slide`               | Each subfolder = one patient     |
+| Research          | Folder with slides     | `--research-mode`             | Auto-group by filename, CSV out  |
 
 > **Auto-detection:** When using `--multi-slide`, the pipeline automatically detects whether the input folder contains slides directly (single patient, requires `--patient-id`) or subfolders (batch of patients, uses subfolder names as patient IDs).
 
 ### Additional Options
 
-| Flag              | Description                                                                  |
-|-------------------|------------------------------------------------------------------------------|
+| Flag              | Description                                                                 |
+| ----------------- | --------------------------------------------------------------------------- |
 | `--resume`        | Skip already-processed slides. Useful for resuming interrupted batch jobs.  |
 | `--patient-id`    | Patient identifier for single-patient multi-slide mode (required).          |
+| `--research-mode` | Enable research mode: auto-group slides by patient ID, output CSV summary.  |
 
 **Example with resume:**
 
