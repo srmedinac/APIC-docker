@@ -509,7 +509,7 @@ def process_slide_nucdiv(nuclei_seg_dir, slide_name, config):
     all_tile_features = {feat_name: [] for feat_name in feature_names}
     
     # Process each tile
-    for png_file in tqdm(png_files, desc="Processing nuclei masks"):
+    for png_file in tqdm(png_files, desc="Processing nuclei masks", file=sys.stdout, ncols=80, position=0, leave=True):
         try:
             # Load nuclei segmentation mask
             mask = cv2.imread(str(png_file), cv2.IMREAD_GRAYSCALE)

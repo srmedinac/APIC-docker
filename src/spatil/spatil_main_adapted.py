@@ -67,7 +67,7 @@ def process_wsi(wsi, config):
 
     # Progress bar for processing tiles
     print(f"Processing {total_tiles} tiles for {wsi}")
-    for tile in tqdm(unprocessed_tiles, desc=f"Processing {wsi}", unit="tile"):
+    for tile in tqdm(unprocessed_tiles, desc=f"Processing {wsi}", unit="tile", file=sys.stdout, ncols=80, position=0, leave=True):
         mask_paths = {
             "epi_stroma": join(config["epi_stroma_masks_dir"], wsi, tile),
             "nuclei": join(config["nuclei_masks_dir"], wsi, tile),

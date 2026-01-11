@@ -1,4 +1,5 @@
 import os
+import sys
 from os.path import join, isfile
 import cv2
 import numpy as np
@@ -272,7 +273,7 @@ def main():
         wsi_chunks = np.array_split(wsi_to_process, config["num_processes"])
         print(f"Using {config['num_processes']} CPU cores")
         with multiprocessing.Pool(processes=config["num_processes"]) as pool:
-            with tqdm(total=len(wsi_to_process), desc="WSI Progress") as pbar:
+            with tqdm(total=len(wsi_to_process), desc="WSI Progress", file=sys.stdout, ncols=80, position=0, leave=True) as pbar:
                 for chunk in wsi_chunks:
                     results = pool.map(partial(process_wsi, config=config), chunk)
                     pbar.update(len(chunk))

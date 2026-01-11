@@ -244,6 +244,24 @@ docker run --gpus all \
 
 > **Auto-detection:** When using `--multi-slide`, the pipeline automatically detects whether the input folder contains slides directly (single patient) or subfolders (batch of patients).
 
+### Additional Options
+
+| Flag       | Description                                                              |
+|------------|--------------------------------------------------------------------------|
+| `--resume` | Skip already-processed slides. Useful for resuming interrupted batch jobs. |
+
+**Example with resume:**
+
+```bash
+docker run --gpus all \
+  -v /path/to/slides_folder:/data/input_slides:ro \
+  -v /path/to/output:/data/output \
+  madabhushilabapic/apic:latest \
+  -i "/data/input_slides/" \
+  -o /data/output \
+  --resume
+```
+
 ### Multi-Slide Feature Aggregation
 
 When processing multiple slides per patient:

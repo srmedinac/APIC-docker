@@ -1,4 +1,5 @@
 import math, sys, time, glob, os
+import warnings
 import geojson
 import matplotlib.pyplot as plt
 from PIL import ImageStat, Image
@@ -11,6 +12,13 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import json
 from skimage.draw import polygon
+
+# Suppress common library warnings for cleaner output
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+warnings.filterwarnings('ignore', message='.*deprecated.*')
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 from collections import OrderedDict
 
@@ -831,7 +839,7 @@ if __name__ == '__main__':
     model = load_model(modelPath, modelMode, nr_types=nr_types)
     print('Model has been loaded.')
     print('Processing slide: ', dataPath)
-    for i in tqdm(range(0, endInd)):
+    for i in tqdm(range(0, endInd), desc="Segmenting tiles", file=sys.stdout, ncols=80, position=0, leave=True):
         sampleName = os.path.basename(files[i]).replace(ext,"")
     
         sampleOutputPath = os.path.join(outPath, sampleName + '.png')

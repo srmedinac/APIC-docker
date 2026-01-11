@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import sys
 from extract_til_features import extract_til_features_for_visualization
 import re
 import json
@@ -12,7 +13,7 @@ def process_slide_lymphocytes(slide_id, patches_dir, mask_dir):
    print(f"Found {len(patches)} patches")
    
    all_lymphocytes = []
-   for patch_name in tqdm(patches):
+   for patch_name in tqdm(patches, desc="Exporting", file=sys.stdout, ncols=80, position=0, leave=True):
        patch_path = os.path.join(patch_dir, patch_name)
        coords = re.findall(r'x(\d+)_y(\d+)_w(\d+)_h(\d+)', patch_name)[0]
        x, y, w, h = map(int, coords)

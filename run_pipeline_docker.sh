@@ -4,6 +4,53 @@ set -euo pipefail
 INPUT_SLIDE=""
 OUTPUT_DIR=""
 MULTI_SLIDE=false
+RESUME=false
+
+# Timing variables for ETA calculation
+declare -a SLIDE_TIMES=()
+BATCH_START=0
+
+# Format seconds to human readable time
+format_time() {
+  local seconds=$1
+  if (( seconds < 60 )); then
+    echo "${seconds}s"
+  elif (( seconds < 3600 )); then
+    echo "$((seconds / 60))m $((seconds % 60))s"
+  else
+    echo "$((seconds / 3600))h $((seconds % 3600 / 60))m"
+  fi
+}
+
+# Calculate average of array
+calc_avg() {
+  local sum=0
+  local count=0
+  for val in "$@"; do
+    sum=$((sum + val))
+    ((count++))
+  done
+  if (( count > 0 )); then
+    echo $((sum / count))
+  else
+    echo 0
+  fi
+}
+
+# Print progress bar
+print_progress() {
+  local current=$1
+  local total=$2
+  local width=30
+  local percent=$((current * 100 / total))
+  local filled=$((current * width / total))
+  local empty=$((width - filled))
+
+  printf "  ["
+  printf "%${filled}s" | tr ' ' '#'
+  printf "%${empty}s" | tr ' ' '-'
+  printf "] %d/%d (%d%%)" "$current" "$total" "$percent"
+}
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -20,6 +67,10 @@ while [[ $# -gt 0 ]]; do
       MULTI_SLIDE=true
       shift
       ;;
+    --resume)
+      RESUME=true
+      shift
+      ;;
     *)
       echo "Unknown argument: $1"
       exit 1
@@ -28,7 +79,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${INPUT_SLIDE}" || -z "${OUTPUT_DIR}" ]]; then
-  echo "Usage: $0 -i <input_slide> -o <output_dir> [--multi-slide]"
+  echo "Usage: $0 -i <input_slide> -o <output_dir> [--multi-slide] [--resume]"
+  echo ""
+  echo "Options:"
+  echo "  --resume            Skip already-processed slides"
   echo ""
   echo "Modes:"
   echo "  Single slide:       -i /path/to/slide.svs -o /output"
@@ -38,7 +92,6 @@ if [[ -z "${INPUT_SLIDE}" || -z "${OUTPUT_DIR}" ]]; then
   echo "                      (All slides in folder = one patient, features averaged)"
   echo "  Batch multi-slide:  -i /path/to/patients_dir/ -o /output --multi-slide"
   echo "                      (Each subfolder = one patient with multiple slides)"
-  echo "                      e.g., /patients/PT1/slide1.svs, /patients/PT2/slide1.svs..."
   exit 1
 fi
 
@@ -47,8 +100,9 @@ echo "============================================================"
 echo "  APIC PIPELINE - Predictive Biomarker for Prostate Cancer"
 echo "============================================================"
 echo ""
-echo "Input:  ${INPUT_SLIDE}"
-echo "Output: ${OUTPUT_DIR}"
+echo "  Input:  ${INPUT_SLIDE}"
+echo "  Output: ${OUTPUT_DIR}"
+[[ "$RESUME" == "true" ]] && echo "  Mode:   Resume (skipping completed slides)"
 echo ""
 
 mkdir -p "${OUTPUT_DIR}"
@@ -57,21 +111,27 @@ SUPPORTED_EXTS=("svs" "tif" "tiff" "ndpi" "mrxs" "scn")
 
 run_one () {
   local SLIDE="$1"
-  local STEPS_ARG="${2:-}"  # Optional: specific steps to run (e.g., "nuclei spatil nucdiv aggregate")
+  local STEPS_ARG="${2:-}"
   local SLIDE_NAME=$(basename "$SLIDE" | sed 's/\.[^.]*$//')
+  local COMPLETION_MARKER="${OUTPUT_DIR}/${SLIDE_NAME}/.complete"
+  local SLIDE_START=$(date +%s)
 
-  echo "============================================================"
-  echo "Processing: $SLIDE_NAME"
-  echo "============================================================"
+  # Check if already processed (resume mode)
+  if [[ "$RESUME" == "true" && -f "$COMPLETION_MARKER" ]]; then
+    echo "  [SKIP] Already processed: $SLIDE_NAME"
+    return 0
+  fi
+
   echo ""
+  echo "  Processing: $SLIDE_NAME"
+  echo "  ------------------------------------------------------------"
 
-  echo "[1/2] Tissue segmentation & patch extraction..."
+  echo "  [1/2] Tissue segmentation & patch extraction..."
   conda run --no-capture-output -n histoqc_env python -u /app/tissue_segmentation_patches.py \
     -i "$SLIDE" \
     -o "$OUTPUT_DIR"
-  echo ""
 
-  echo "[2/2] Feature extraction & biomarker prediction..."
+  echo "  [2/2] Feature extraction & biomarker prediction..."
   if [[ -n "$STEPS_ARG" ]]; then
     conda run --no-capture-output -n apic_env python -u /app/feature_extraction_prediction.py \
       -i "$SLIDE" \
@@ -82,7 +142,15 @@ run_one () {
       -i "$SLIDE" \
       -o "$OUTPUT_DIR"
   fi
+
+  # Mark as complete
+  touch "$COMPLETION_MARKER"
+
+  local SLIDE_END=$(date +%s)
+  local SLIDE_DURATION=$((SLIDE_END - SLIDE_START))
+  SLIDE_TIMES+=($SLIDE_DURATION)
   echo ""
+  echo "  Completed in $(format_time $SLIDE_DURATION)"
 }
 
 process_patient_folder () {
@@ -90,9 +158,8 @@ process_patient_folder () {
   local PATIENT_ID=$(basename "${PATIENT_FOLDER}")
 
   echo ""
-  echo "============================================================"
   echo "  Patient: $PATIENT_ID"
-  echo "============================================================"
+  echo "  ============================================================"
 
   # Count slides for this patient
   local SLIDE_COUNT=0
@@ -105,34 +172,29 @@ process_patient_folder () {
   shopt -u nullglob
 
   if [[ $SLIDE_COUNT -eq 0 ]]; then
-    echo "  [SKIP] No supported WSI files found for patient $PATIENT_ID"
+    echo "  [SKIP] No supported WSI files found"
     return
   fi
 
   echo "  Found $SLIDE_COUNT slide(s)"
-  echo ""
 
-  # Process each slide through steps 1-6 only
+  # Process each slide
   local CURRENT=0
   shopt -s nullglob
   for ext in "${SUPPORTED_EXTS[@]}"; do
     for f in "${PATIENT_FOLDER}"/*.${ext}; do
       ((CURRENT++)) || true
       echo ""
-      echo "  --------------------------------------------------------"
-      echo "    Slide $CURRENT of $SLIDE_COUNT: $(basename "$f")"
-      echo "  --------------------------------------------------------"
+      echo "    Slide $CURRENT/$SLIDE_COUNT: $(basename "$f")"
       run_one "$f" "nuclei spatil nucdiv aggregate"
     done
   done
   shopt -u nullglob
 
-  # Run patient-level aggregation, prediction, and report
+  # Run patient-level aggregation
   echo ""
-  echo "  --------------------------------------------------------"
-  echo "    Patient-Level Aggregation & Prediction"
-  echo "  --------------------------------------------------------"
-  echo ""
+  echo "  Patient-Level Aggregation & Prediction"
+  echo "  ------------------------------------------------------------"
   conda run --no-capture-output -n apic_env python -u /app/feature_extraction_prediction.py \
     --patient-aggregate \
     --patient-id "$PATIENT_ID" \
@@ -140,8 +202,25 @@ process_patient_folder () {
     -o "$OUTPUT_DIR"
 }
 
+# Print ETA after processing a slide
+print_eta() {
+  local current=$1
+  local total=$2
+  local remaining=$((total - current))
+
+  if (( ${#SLIDE_TIMES[@]} > 0 && remaining > 0 )); then
+    local avg_time=$(calc_avg "${SLIDE_TIMES[@]}")
+    local eta_seconds=$((avg_time * remaining))
+    echo ""
+    print_progress "$current" "$total"
+    echo " | ETA: $(format_time $eta_seconds)"
+  fi
+}
+
+BATCH_START=$(date +%s)
+
 if [[ "${MULTI_SLIDE}" == "true" ]] && [[ -d "${INPUT_SLIDE}" ]]; then
-  # Check if input contains slides directly (single patient) or subdirectories (batch)
+  # Check if input contains slides directly or subdirectories
   DIRECT_SLIDE_COUNT=0
   shopt -s nullglob
   for ext in "${SUPPORTED_EXTS[@]}"; do
@@ -152,15 +231,10 @@ if [[ "${MULTI_SLIDE}" == "true" ]] && [[ -d "${INPUT_SLIDE}" ]]; then
   shopt -u nullglob
 
   if [[ $DIRECT_SLIDE_COUNT -gt 0 ]]; then
-    # Single patient multi-slide mode (slides directly in input folder)
-    echo "Mode: Multi-slide (single patient with multiple slides)"
-    echo ""
+    echo "Mode: Multi-slide (single patient)"
     process_patient_folder "${INPUT_SLIDE}"
-
   else
-    # Batch multi-slide mode (subdirectories are patient folders)
-    echo "Mode: Batch Multi-slide (multiple patients, each with multiple slides)"
-    echo ""
+    echo "Mode: Batch Multi-slide"
 
     # Count patient folders
     PATIENT_COUNT=0
@@ -172,14 +246,11 @@ if [[ "${MULTI_SLIDE}" == "true" ]] && [[ -d "${INPUT_SLIDE}" ]]; then
 
     if [[ $PATIENT_COUNT -eq 0 ]]; then
       echo "ERROR: No patient subdirectories found in: ${INPUT_SLIDE}"
-      echo "Expected structure: /input/PT1/slide1.svs, /input/PT2/slide1.svs, ..."
       exit 1
     fi
 
     echo "Found $PATIENT_COUNT patient folder(s)"
-    echo ""
 
-    # Process each patient folder
     CURRENT_PATIENT=0
     for patient_dir in "${INPUT_SLIDE}"/*/; do
       if [[ -d "$patient_dir" ]]; then
@@ -189,18 +260,15 @@ if [[ "${MULTI_SLIDE}" == "true" ]] && [[ -d "${INPUT_SLIDE}" ]]; then
         echo "  Patient $CURRENT_PATIENT of $PATIENT_COUNT"
         echo "============================================================"
         process_patient_folder "${patient_dir%/}"
+        print_eta "$CURRENT_PATIENT" "$PATIENT_COUNT"
       fi
     done
   fi
 
 elif [[ -d "${INPUT_SLIDE}" ]]; then
   echo "Mode: Batch (directory)"
-  echo ""
 
-  FOUND=false
   COUNT=0
-
-  # Count slides first
   shopt -s nullglob
   for ext in "${SUPPORTED_EXTS[@]}"; do
     for f in "${INPUT_SLIDE}"/*.${ext}; do
@@ -216,7 +284,6 @@ elif [[ -d "${INPUT_SLIDE}" ]]; then
   fi
 
   echo "Found $COUNT slide(s) to process"
-  echo ""
 
   CURRENT=0
   shopt -s nullglob
@@ -228,18 +295,22 @@ elif [[ -d "${INPUT_SLIDE}" ]]; then
       echo "  Slide $CURRENT of $COUNT"
       echo "============================================================"
       run_one "$f"
+      print_eta "$CURRENT" "$COUNT"
     done
   done
   shopt -u nullglob
 
 else
   echo "Mode: Single slide"
-  echo ""
   run_one "${INPUT_SLIDE}"
 fi
+
+BATCH_END=$(date +%s)
+TOTAL_TIME=$((BATCH_END - BATCH_START))
 
 echo ""
 echo "============================================================"
 echo "  PIPELINE COMPLETE"
+echo "  Total time: $(format_time $TOTAL_TIME)"
 echo "============================================================"
 echo ""

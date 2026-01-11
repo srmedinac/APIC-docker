@@ -26,6 +26,13 @@ import scipy.io as sio
 import warnings
 from PIL import Image
 
+# Suppress common library warnings for cleaner output
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+warnings.filterwarnings('ignore', message='.*deprecated.*')
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow logging
+
 # Allow large images
 Image.MAX_IMAGE_PIXELS = None
 
