@@ -714,39 +714,6 @@ class APICPatientPipeline:
 
         return sorted(slide_dirs)
 
-    def _get_tissue_area(self, slide_dir: Path) -> float:
-        """Get total tissue area from a slide's QC mask."""
-        import cv2
-
-        slide_name = slide_dir.name
-        # Look for the tissue mask
-        qc_dir = slide_dir / "qc"
-        mask_patterns = [
-            qc_dir / f"{slide_name}*" / f"*_mask_use.png",
-        ]
-
-        # Find mask file
-        mask_path = None
-        for pattern in mask_patterns:
-            matches = list(qc_dir.glob(f"{slide_name}*/*_mask_use.png"))
-            if matches:
-                mask_path = matches[0]
-                break
-
-        if mask_path is None or not mask_path.exists():
-            logger.warning(f"No tissue mask found for {slide_name}, returning 0")
-            return 0.0
-
-        try:
-            mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-            if mask is None:
-                return 0.0
-            # Count white pixels (tissue area)
-            return float(np.sum(mask > 127))
-        except Exception as e:
-            logger.warning(f"Error reading mask for {slide_name}: {e}")
-            return 0.0
-
     def aggregate_patient_features(self):
         """Aggregate slide-level features to patient level using np.nanmean."""
         log_step_header("Patient-Level Feature Aggregation", "P1")
@@ -754,6 +721,11 @@ class APICPatientPipeline:
 
         spatil_output = self.dirs['final'] / f"{self.patient_id}_spatil_aggregated.csv"
         nucdiv_output = self.dirs['final'] / f"{self.patient_id}_nucdiv.csv"
+
+        # Resume check: skip if both outputs exist
+        if spatil_output.exists() and nucdiv_output.exists():
+            logger.info("Already complete: aggregated features exist")
+            return
 
         # Collect spaTIL features from all slides
         all_spatil = []
@@ -808,6 +780,11 @@ class APICPatientPipeline:
 
         prediction_output = self.dirs['final'] / f"{self.patient_id}_prediction.csv"
 
+        # Resume check: skip if prediction exists
+        if prediction_output.exists():
+            logger.info("Already complete: prediction exists")
+            return
+
         # Load patient-level features
         spatil_file = self.dirs['final'] / f"{self.patient_id}_spatil_aggregated.csv"
         nucdiv_file = self.dirs['final'] / f"{self.patient_id}_nucdiv.csv"
@@ -850,7 +827,7 @@ class APICPatientPipeline:
         logger.info(f"Result: {risk_group} (risk score: {risk_score:.3f})")
 
     def select_representative_overlay(self):
-        """Select overlay from slide with largest tissue area."""
+        """Select overlay from first available slide."""
         log_step_header("Patient Tissue Overlay", "P3")
         start = time.time()
 
@@ -860,32 +837,27 @@ class APICPatientPipeline:
             logger.info("Already complete: overlay exists")
             return
 
-        # Find slide with largest tissue area
-        best_slide = None
-        best_area = -1.0
-
+        # Find first available overlay from any slide
         for slide_dir in self.slide_dirs:
-            area = self._get_tissue_area(slide_dir)
-            logger.info(f"  {slide_dir.name}: tissue area = {area:.0f}")
-            if area > best_area:
-                best_area = area
-                best_slide = slide_dir
-
-        if best_slide:
-            source_overlay = best_slide / "qc" / f"{best_slide.name}_tissue_overlay.png"
+            source_overlay = slide_dir / "qc" / f"{slide_dir.name}_tissue_overlay.png"
             if source_overlay.exists():
                 shutil.copy2(source_overlay, overlay_output)
-                logger.info(f"  Selected overlay from: {best_slide.name} (largest tissue area)")
-            else:
-                logger.warning(f"Overlay not found for best slide: {best_slide.name}")
-        else:
-            logger.warning("No slides found with valid tissue area")
+                logger.info(f"  Selected overlay from: {slide_dir.name}")
+                log_step_complete("Patient overlay", time.time() - start)
+                return
 
+        logger.warning("No overlay found in any slide")
         log_step_complete("Patient overlay", time.time() - start)
 
     def copy_visualizations(self):
         """Copy spaTIL visualizations from slides to patient directory."""
         log_step_header("Patient Visualizations", "P4")
+
+        # Resume check: skip if visualizations already exist
+        existing_viz = list(self.dirs['spatil_viz'].glob("viz_*.png"))
+        if len(existing_viz) >= 4:
+            logger.info("Already complete: visualizations exist")
+            return
 
         # Collect visualizations from all slides, pick representative ones
         all_viz = []
@@ -907,6 +879,12 @@ class APICPatientPipeline:
         """Generate APIC PDF report for patient."""
         log_step_header("Patient APIC Report Generation", "P5")
         start = time.time()
+
+        # Resume check: skip if report exists
+        report_path = self.dirs['report'] / f"{self.patient_id}_report.pdf"
+        if report_path.exists():
+            logger.info("Already complete: report exists")
+            return
 
         cmd = [
             sys.executable, "src/build_apic_report_final.py",

@@ -294,7 +294,7 @@ def make_report_for_patient(pdir: Path, page1_template_pos: Path, page1_template
     c.showPage()
     c.save()
 
-    out_pdf_name = f"APIC_report_{patient_id}.pdf"
+    out_pdf_name = f"{patient_id}_report.pdf"
     patient_report_dir = pdir / "report"
     patient_report_dir.mkdir(parents=True, exist_ok=True)
     patient_pdf = patient_report_dir / out_pdf_name

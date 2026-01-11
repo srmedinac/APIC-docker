@@ -268,8 +268,48 @@ When processing multiple slides per patient:
 
 1. Each slide is processed independently through feature extraction
 2. Features from all slides are **averaged using nanmean** (ignoring missing values)
-3. The tissue overlay in the report comes from the slide with the **largest tissue area**
+3. The tissue overlay in the report comes from the **first available slide**
 4. A single prediction and PDF report is generated per patient
+
+### Patient ID and Report Naming
+
+The patient ID (and report filename) is determined by the **folder name**:
+
+| Mode              | Patient ID Source     | Report Name                    |
+|-------------------|-----------------------|--------------------------------|
+| Single slide      | Slide filename (stem) | `{slide_name}_report.pdf`      |
+| Batch             | Each slide filename   | `{slide_name}_report.pdf`      |
+| Multi-slide       | Input folder name     | `{folder_name}_report.pdf`     |
+| Batch multi-slide | Each subfolder name   | `{subfolder_name}_report.pdf`  |
+
+**Example for multi-slide:**
+
+```text
+# If your folder structure is:
+/data/PT77/
+  ├── slide1.svs
+  └── slide2.svs
+
+# Running with: -i /data/PT77/ --multi-slide
+# Produces: PT77_report.pdf
+```
+
+**Example for batch multi-slide:**
+
+```text
+# If your folder structure is:
+/data/patients/
+  ├── PT77/
+  │   ├── slide1.svs
+  │   └── slide2.svs
+  └── PT78/
+      └── slide1.svs
+
+# Running with: -i /data/patients/ --multi-slide
+# Produces: PT77_report.pdf, PT78_report.pdf
+```
+
+> **Important:** Name your patient folders with the desired patient ID. The folder name becomes the patient identifier in all outputs.
 
 ---
 
