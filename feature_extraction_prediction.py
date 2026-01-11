@@ -780,8 +780,10 @@ class APICPatientPipeline:
             nucdiv_file = slide_dir / "final_features" / f"{slide_dir.name}_nucdiv.csv"
             if nucdiv_file.exists():
                 df = pd.read_csv(nucdiv_file)
-                nucdiv_columns = df.columns
-                all_nucdiv.append(df.values[0])
+                # Exclude slide_id column (first column is string identifier)
+                numeric_df = df.select_dtypes(include=[np.number])
+                nucdiv_columns = numeric_df.columns
+                all_nucdiv.append(numeric_df.values[0])
                 logger.info(f"  Loaded nucdiv from: {slide_dir.name}")
 
         if all_nucdiv:
