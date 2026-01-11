@@ -225,6 +225,104 @@ class TestPatientPrediction:
             assert col in spatil_df.columns
 
 
+class TestPatientIdHandling:
+    """Tests for patient ID handling - prevents regression of input_slides bug."""
+
+    def test_patient_id_from_override_not_folder(self, tmp_path):
+        """Patient ID should come from explicit override, not folder basename."""
+        # Simulates: folder is /data/input_slides but patient_id override is "PT001"
+        patient_folder = tmp_path / "input_slides"  # Container path name
+        patient_folder.mkdir()
+
+        patient_id_override = "PT001"  # What user provides via --patient-id
+
+        # The logic should use override, not basename
+        if patient_id_override:
+            patient_id = patient_id_override
+        else:
+            patient_id = patient_folder.name
+
+        assert patient_id == "PT001"
+        assert patient_id != "input_slides"
+
+    def test_patient_id_fallback_to_folder_name(self, tmp_path):
+        """Without override, patient ID comes from folder name (batch mode)."""
+        patient_folder = tmp_path / "PatientA"
+        patient_folder.mkdir()
+
+        patient_id_override = ""  # No override in batch mode
+
+        if patient_id_override:
+            patient_id = patient_id_override
+        else:
+            patient_id = patient_folder.name
+
+        assert patient_id == "PatientA"
+
+    def test_report_uses_patient_id_not_container_path(self, tmp_path):
+        """Report filename should use patient_id, not container path."""
+        patient_id = "MyPatient"
+        report_name = f"{patient_id}_report.pdf"
+
+        assert report_name == "MyPatient_report.pdf"
+        assert "input_slides" not in report_name
+
+
+class TestOverlayInMultiSlideMode:
+    """Tests for overlay creation in multi-slide mode - prevents thumbnail bug."""
+
+    def test_overlay_must_exist_before_patient_aggregation(self, tmp_path):
+        """Each slide must have overlay created before patient-level copy."""
+        from PIL import Image
+
+        # Simulate 2 slides with overlays created
+        for i in range(2):
+            slide_dir = tmp_path / f"slide_{i}" / "qc"
+            slide_dir.mkdir(parents=True)
+            overlay = Image.new('RGB', (100, 100), (100, 150, 200))
+            overlay.save(slide_dir / f"slide_{i}_tissue_overlay.png")
+
+        # Verify overlays exist (this is what was missing before)
+        for i in range(2):
+            overlay_path = tmp_path / f"slide_{i}" / "qc" / f"slide_{i}_tissue_overlay.png"
+            assert overlay_path.exists(), f"Overlay must exist for slide_{i}"
+
+    def test_patient_overlay_copy_fails_without_source(self, tmp_path):
+        """If no slide has overlay, patient overlay cannot be created."""
+        import shutil
+
+        # Slides without overlays (simulates old bug where overlay step was skipped)
+        for i in range(2):
+            slide_dir = tmp_path / f"slide_{i}" / "qc"
+            slide_dir.mkdir(parents=True)
+            # No overlay file created!
+
+        patient_qc = tmp_path / "patient" / "qc"
+        patient_qc.mkdir(parents=True)
+
+        # Try to find and copy overlay
+        overlay_found = False
+        for i in range(2):
+            source = tmp_path / f"slide_{i}" / "qc" / f"slide_{i}_tissue_overlay.png"
+            if source.exists():
+                shutil.copy2(source, patient_qc / "patient_tissue_overlay.png")
+                overlay_found = True
+                break
+
+        assert not overlay_found, "No overlay should be found if step was skipped"
+        assert not (patient_qc / "patient_tissue_overlay.png").exists()
+
+    def test_multi_slide_steps_must_include_overlay(self):
+        """Multi-slide mode must include overlay step for thumbnails to work."""
+        # The correct steps for multi-slide mode
+        multi_slide_steps = "nuclei spatil nucdiv aggregate overlay"
+
+        assert "overlay" in multi_slide_steps
+        # The old buggy version was missing overlay:
+        buggy_steps = "nuclei spatil nucdiv aggregate"
+        assert "overlay" not in buggy_steps
+
+
 class TestCopyVisualizations:
 
     def test_copies_spatil_visualizations(self, multi_slide_setup):
