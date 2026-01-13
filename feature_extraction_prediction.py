@@ -251,6 +251,18 @@ class APICPipeline:
             return False
         return path.exists() if path else False
 
+    def _has_valid_patches(self) -> bool:
+        """
+        Check if slide has any valid patches for processing.
+
+        Returns False if no patches exist (QC likely failed).
+        """
+        patches_dir = self.dirs['patches'] / self.slide_name / "tiles"
+        if not patches_dir.exists():
+            return False
+        patch_count = len(list(patches_dir.glob("*.jpeg")))
+        return patch_count > 0
+
     def step3_nuclei_segmentation(self):
         """Run HoVerNet nuclei segmentation on patches."""
         log_step_header("Nuclei Segmentation", 3)
@@ -386,6 +398,11 @@ class APICPipeline:
                     mask_count += 1
 
                 logger.info(f"Linked {mask_count} masks to temp structure")
+
+                # Safety check: skip if no masks (QC failure case)
+                if mask_count == 0:
+                    logger.warning("No nuclei masks found - skipping nuclear diversity extraction")
+                    return
 
                 # Run MATLAB executable
                 executable = Path("src/nucdiv_executable_pipeline")
@@ -634,6 +651,12 @@ class APICPipeline:
         logger.info(f"APIC PIPELINE - {self.slide_name}")
         logger.info(f"Steps: {', '.join(steps)}")
         logger.info("=" * 60)
+
+        # Check for valid patches before processing (QC failure detection)
+        if not self._has_valid_patches():
+            logger.warning(f"SKIPPING: No patches found for {self.slide_name} (QC likely failed)")
+            logger.warning("This slide will not produce features or predictions")
+            return  # Exit gracefully without running any steps
 
         pipeline_start = time.time()
 
@@ -1040,7 +1063,7 @@ class APICResearchPipeline:
                 spatil_columns = df.columns
                 all_spatil.append(df.values[0])
             else:
-                logger.warning(f"Missing spaTIL for {slide_name}")
+                logger.warning(f"  Missing spaTIL for {slide_name} (may have failed QC)")
 
             # Load nucdiv features
             nucdiv_file = slide_dir / "final_features" / f"{slide_name}_nucdiv.csv"
@@ -1050,7 +1073,7 @@ class APICResearchPipeline:
                 nucdiv_columns = numeric_df.columns
                 all_nucdiv.append(numeric_df.values[0])
             else:
-                logger.warning(f"Missing nucdiv for {slide_name}")
+                logger.warning(f"  Missing nucdiv for {slide_name} (may have failed QC)")
 
         if not all_spatil or not all_nucdiv:
             logger.error(f"Patient {patient_id}: insufficient features for aggregation")
@@ -1159,6 +1182,83 @@ class APICResearchPipeline:
 
         logger.warning(f"  No overlay found for patient {patient_id}")
 
+    def _load_existing_result(self, patient_id: str) -> dict:
+        """
+        Load existing prediction results for a patient if they exist.
+
+        Used for resume functionality - skips reprocessing completed patients.
+
+        Args:
+            patient_id: Patient identifier
+
+        Returns:
+            Complete result dictionary matching _run_prediction() format, or None
+        """
+        patient_dir = self.output_dir / patient_id
+        final_dir = patient_dir / "final_features"
+
+        # Primary check: prediction CSV must exist
+        prediction_file = final_dir / f"{patient_id}_prediction.csv"
+        if not prediction_file.exists():
+            return None
+
+        try:
+            # Load prediction results
+            pred_df = pd.read_csv(prediction_file)
+
+            # Validate prediction CSV structure
+            required_pred_cols = ['patient_id', 'risk_score', 'risk_group']
+            missing_cols = [col for col in required_pred_cols if col not in pred_df.columns]
+            if missing_cols:
+                logger.warning(f"  Patient {patient_id}: prediction CSV missing columns {missing_cols}, reprocessing")
+                return None
+
+            if len(pred_df) == 0:
+                logger.warning(f"  Patient {patient_id}: prediction CSV is empty, reprocessing")
+                return None
+
+            # Load feature CSVs to reconstruct complete result dictionary
+            spatil_file = final_dir / f"{patient_id}_spatil_aggregated.csv"
+            nucdiv_file = final_dir / f"{patient_id}_nucdiv.csv"
+
+            if not spatil_file.exists() or not nucdiv_file.exists():
+                logger.warning(f"  Patient {patient_id}: feature files missing, reprocessing")
+                return None
+
+            spatil_df = pd.read_csv(spatil_file)
+            nucdiv_df = pd.read_csv(nucdiv_file)
+
+            # Extract feature values (matching _run_prediction format)
+            result = {
+                'patient_id': patient_id,
+                'Area.Energy.var': nucdiv_df['Area.Energy.var'].values[0],
+                'Area.InvDiffMom.Skewness': nucdiv_df['Area.InvDiffMom.Skewness'].values[0],
+                'MinorAxisLength.Energy.Prcnt90': nucdiv_df['MinorAxisLength.Energy.Prcnt90'].values[0],
+                'Area.DiffAvg.Prcnt10': nucdiv_df['Area.DiffAvg.Prcnt10'].values[0],
+                'X341': spatil_df['feature_342'].values[0],
+                'X51': spatil_df['feature_52'].values[0],
+                'risk_score': pred_df['risk_score'].values[0],
+                'risk_group': pred_df['risk_group'].values[0]
+            }
+
+            return result
+
+        except KeyError as e:
+            logger.warning(f"  Patient {patient_id}: missing required feature/column {e}, reprocessing")
+            return None
+        except pd.errors.EmptyDataError:
+            logger.warning(f"  Patient {patient_id}: corrupted CSV file (empty), reprocessing")
+            return None
+        except pd.errors.ParserError:
+            logger.warning(f"  Patient {patient_id}: corrupted CSV file, reprocessing")
+            return None
+        except IndexError:
+            logger.warning(f"  Patient {patient_id}: CSV file has no data rows, reprocessing")
+            return None
+        except Exception as e:
+            logger.warning(f"  Patient {patient_id}: error loading existing results ({e}), reprocessing")
+            return None
+
     def run(self):
         """
         Run the research pipeline.
@@ -1187,6 +1287,16 @@ class APICResearchPipeline:
         for patient_id, slide_names in self.patient_groups.items():
             logger.info("")
             logger.info(f"Processing patient: {patient_id} ({len(slide_names)} slides)")
+
+            # Resume check: try to load existing results
+            if self.config['pipeline']['resume_on_existing']:
+                existing_result = self._load_existing_result(patient_id)
+                if existing_result is not None:
+                    logger.info(f"  Resuming: prediction already exists (score: {existing_result['risk_score']:.3f})")
+                    results.append(existing_result)
+                    # Overlay copy is idempotent (checks exists), safe to call
+                    self._copy_patient_overlay(patient_id, slide_names)
+                    continue
 
             # Aggregate features
             features = self._aggregate_patient_features(patient_id, slide_names)
