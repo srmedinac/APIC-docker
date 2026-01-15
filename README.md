@@ -294,19 +294,6 @@ The patient ID is extracted as the **number before the first underscore** in the
   └── [individual slide outputs]   ← Preserved for each slide
 ```
 
-**research_results.csv columns:**
-
-| Column                           | Description                                  |
-| -------------------------------- | -------------------------------------------- |
-| `patient_id`                     | Patient identifier (extracted from filename) |
-| `Area.Energy.var`                | Nuclear diversity feature                    |
-| `Area.InvDiffMom.Skewness`       | Nuclear diversity feature                    |
-| `MinorAxisLength.Energy.Prcnt90` | Nuclear diversity feature                    |
-| `Area.DiffAvg.Prcnt10`           | Nuclear diversity feature                    |
-| `X341`                           | spaTIL spatial feature                       |
-| `X51`                            | spaTIL spatial feature                       |
-| `risk_score`                     | Cox model risk score (numeric)               |
-| `risk_group`                     | "High Risk" or "Low Risk"                    |
 
 > **Note:** Slides that don't match the expected naming pattern (number before first underscore) will be skipped with a warning.
 
