@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+umask 0002
+
 INPUT_SLIDE=""
 OUTPUT_DIR=""
 MULTI_SLIDE=false
 RESUME=false
 PATIENT_ID=""
 RESEARCH_MODE=false
+NUM_PROCESSES=12
+LOG_DIR=""
 
 # Timing variables for ETA calculation
 declare -a SLIDE_TIMES=()
@@ -81,6 +85,14 @@ while [[ $# -gt 0 ]]; do
       RESEARCH_MODE=true
       shift
       ;;
+    --num-processes)
+      NUM_PROCESSES="$2"
+      shift 2
+      ;;
+    --log-dir)
+      LOG_DIR="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown argument: $1"
       exit 1
@@ -121,44 +133,66 @@ echo ""
 
 mkdir -p "${OUTPUT_DIR}"
 
+umask 0002
+
+if [[ -z "${LOG_DIR}" ]]; then
+  LOG_DIR="${OUTPUT_DIR}/logs"
+fi
+mkdir -p "${LOG_DIR}"
+
 SUPPORTED_EXTS=("svs" "tif" "tiff" "ndpi" "mrxs" "scn")
 
 run_one () {
   local SLIDE="$1"
   local STEPS_ARG="${2:-}"
   local SLIDE_NAME=$(basename "$SLIDE" | sed 's/\.[^.]*$//')
-  local COMPLETION_MARKER="${OUTPUT_DIR}/${SLIDE_NAME}/.complete"
+  # local COMPLETION_MARKER="${OUTPUT_DIR}/${SLIDE_NAME}/.complete"
   local SLIDE_START=$(date +%s)
+  local TS=$(date +"%Y%m%d_%H%M%S")
+  local SLIDE_LOG="${LOG_DIR}/${SLIDE_NAME}_${TS}.log"
 
-  # Check if already processed (resume mode)
-  if [[ "$RESUME" == "true" && -f "$COMPLETION_MARKER" ]]; then
-    echo "  [SKIP] Already processed: $SLIDE_NAME"
-    return 0
-  fi
+  echo "  Log file: ${SLIDE_LOG}"
+
+  # # Check if already processed (resume mode)
+  # if [[ "$RESUME" == "true" && -f "$COMPLETION_MARKER" ]]; then
+  #   echo "  [SKIP] Already processed: $SLIDE_NAME"
+  #   return 0
+  # fi
 
   echo ""
   echo "  Processing: $SLIDE_NAME"
   echo "  ------------------------------------------------------------"
 
   echo "  [1/2] Tissue segmentation & patch extraction..."
-  conda run --no-capture-output -n histoqc_env python -u /app/tissue_segmentation_patches.py \
-    -i "$SLIDE" \
-    -o "$OUTPUT_DIR"
+  {
+    conda run --no-capture-output -n histoqc_env python -u /app/tissue_segmentation_patches.py \
+      -i "$SLIDE" \
+      -o "$OUTPUT_DIR"
+  } 2>&1 | tee -a "${SLIDE_LOG}"
+  test ${PIPESTATUS[0]} -eq 0 || { echo "  [ERROR] Tissue segmentation & patch extraction failed"; return 1; }
 
   echo "  [2/2] Feature extraction & biomarker prediction..."
   if [[ -n "$STEPS_ARG" ]]; then
+  {
     conda run --no-capture-output -n apic_env python -u /app/feature_extraction_prediction.py \
       -i "$SLIDE" \
       -o "$OUTPUT_DIR" \
+      --num_processes "$NUM_PROCESSES" \
       --steps $STEPS_ARG
+  } 2>&1 | tee -a "${SLIDE_LOG}"
+  test ${PIPESTATUS[0]} -eq 0 || { echo "  [ERROR] Feature extraction & prediction failed"; return 1;    }
   else
+  {
     conda run --no-capture-output -n apic_env python -u /app/feature_extraction_prediction.py \
       -i "$SLIDE" \
-      -o "$OUTPUT_DIR"
+      -o "$OUTPUT_DIR" \
+      --num_processes "$NUM_PROCESSES"
+  } 2>&1 | tee -a "${SLIDE_LOG}"
+  test ${PIPESTATUS[0]} -eq 0 || { echo "  [ERROR] Feature extraction & prediction failed"; return 1; }
   fi
 
-  # Mark as complete
-  touch "$COMPLETION_MARKER"
+  # # Mark as complete
+  # touch "$COMPLETION_MARKER"
 
   local SLIDE_END=$(date +%s)
   local SLIDE_DURATION=$((SLIDE_END - SLIDE_START))

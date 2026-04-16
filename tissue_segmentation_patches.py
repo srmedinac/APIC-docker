@@ -151,10 +151,13 @@ class BiomarkerPipelineStep1_2:
         """Step 2: Patch extraction using the HistoQC mask"""
         logger.info("[STEP2] Patch extraction")
 
-        expected_tiles_dir = self.dirs['patches'] / self.slide_name / "tiles"
-        if self._skip_if_exists(expected_tiles_dir) and any(expected_tiles_dir.glob("*.jpeg")):
-            logger.info("[STEP2] Patches already exist, skipping.")
-            return
+        # expected_tiles_dir = self.dirs['patches'] / self.slide_name / "tiles"
+        # if self._skip_if_exists(expected_tiles_dir) and any(expected_tiles_dir.glob("*.jpeg")):
+        #     logger.info("[STEP2] Patches already exist, skipping.")
+        #     return
+
+        existing = 0
+        newly_saved = 0
 
         # Ensure tissue mask exists (HistoQC mask)
         if not hasattr(self, 'tissue_mask_path'):
@@ -257,13 +260,22 @@ class BiomarkerPipelineStep1_2:
                 ).convert("RGB")
 
                 patch_name = f"{self.slide_name}_x{x}_y{y}_l{level}.jpeg"
-                region.save(tiles_dir / patch_name, "JPEG")
+                patch_path = tiles_dir / patch_name
+                if patch_path.exists():
+                    existing += 1
+                else:
+                    region.save(tiles_dir / patch_name, "JPEG")
+                    newly_saved += 1
                 kept += 1
 
                 x += stride
             y += stride
 
-        logger.info(f"[STEP2] Extracted {kept} patches (evaluated {total} positions)")
+            logger.info(
+            f"[STEP2] Patch extraction complete | expected valid patches={kept} | "
+            f"existing={existing} | newly_saved={newly_saved} | "
+            f"evaluated_positions={total}"
+        )
 
     def _skip_if_exists(self, path=None):
         if not self.config['pipeline']['resume_on_existing']:

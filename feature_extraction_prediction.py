@@ -303,13 +303,18 @@ class APICPipeline:
         cmd = [
             sys.executable, "src/nucleusSegmentationTiles.py",
             str(temp_dir), '.jpeg',
-            cfg['model_path'], cfg['mode'],
+            cfg['model_path'], cfg['mode'], "6",
             str(cfg['batch_size']), cfg['type_info_path'],
             str(output_dir)
         ]
 
+        # env = os.environ.copy()
+        # env["CUDA_VISIBLE_DEVICES"] = "0"
+
+        # run_subprocess(cmd, "HoVerNet nuclei segmentation", env=env)
+
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = "0"
+        logger.info(f"CUDA_VISIBLE_DEVICES: {env.get('CUDA_VISIBLE_DEVICES', 'not set (using all visible GPUs)')}")
 
         run_subprocess(cmd, "HoVerNet nuclei segmentation", env=env)
 
@@ -327,8 +332,22 @@ class APICPipeline:
 
         output_dir = self.dirs['spatil'] / self.slide_name
 
-        if self._should_skip(output_dir) and any(output_dir.glob("*.csv")):
-            logger.info("Already complete: spaTIL features exist")
+        # if self._should_skip(output_dir) and any(output_dir.glob("*.csv")):
+        #     logger.info("Already complete: spaTIL features exist")
+        #     return
+
+        patch_count = self._count_patch_tiles()
+        nuclei_count = self._count_nuclei_masks()
+        existing_spatil = self._count_spatil_csvs()
+
+        logger.info(f"spaTIL completeness check: patches={patch_count}, nuclei_masks={nuclei_count}, spatil_csvs={existing_spatil}")
+
+        if nuclei_count == 0:
+            raise RuntimeError("No nuclei masks found. Run nuclei step first.")
+
+        # Always call spaTIL when resume is enabled unless truly complete.
+        if existing_spatil == nuclei_count and nuclei_count > 0:
+            logger.info("spaTIL already complete")
             return
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -374,9 +393,13 @@ class APICPipeline:
         else:
             mat_output = None
 
-        # Skip if already done
-        if self._should_skip(csv_output):
-            logger.info(f"Already complete: {csv_output.name} exists")
+        # # Skip if already done
+        # if self._should_skip(csv_output):
+        #     logger.info(f"Already complete: {csv_output.name} exists")
+        #     return
+
+        if self._is_nucdiv_complete(csv_output):
+            logger.info(f"Nuclear diversity already complete: {csv_output.name}")
             return
 
         temp_dir = None
@@ -450,8 +473,20 @@ class APICPipeline:
         spatil_exists = self._should_skip(spatil_output)
         nucdiv_exists = self._should_skip(nucdiv_output)
 
-        if spatil_exists and nucdiv_exists:
-            logger.info("Already complete: aggregated features exist")
+        # if spatil_exists and nucdiv_exists:
+        #     logger.info("Already complete: aggregated features exist")
+        #     return
+
+        nuclei_count = self._count_nuclei_masks()
+        spatil_count = self._count_spatil_csvs()
+
+        if nuclei_count == 0:
+            raise RuntimeError("No nuclei masks found for aggregation checks.")
+
+        if spatil_count != nuclei_count:
+            logger.info(f"spaTIL aggregation blocked: only {spatil_count}/{nuclei_count} patch CSVs exist")
+        elif spatil_exists and nucdiv_exists:
+            logger.info("Aggregated features already complete")
             return
 
         # Aggregate spaTIL features (if not already done)
@@ -498,8 +533,12 @@ class APICPipeline:
 
         prediction_output = self.dirs['final'] / f"{self.slide_name}_prediction.csv"
 
-        if self._should_skip(prediction_output):
-            logger.info("Already complete: prediction exists")
+        # if self._should_skip(prediction_output):
+        #     logger.info("Already complete: prediction exists")
+        #     return
+
+        if self._is_prediction_complete(prediction_output):
+            logger.info("Prediction already complete")
             return
 
         # Load features
@@ -705,6 +744,36 @@ class APICPipeline:
                 logger.info(f"  ✗ {name}: missing")
 
         logger.info("=" * 60)
+    
+    def _count_patch_tiles(self) -> int:
+        patches_dir = self.dirs['patches'] / self.slide_name / "tiles"
+        return len(list(patches_dir.glob("*.jpeg"))) if patches_dir.exists() else 0
+
+    def _count_nuclei_masks(self) -> int:
+        nuclei_dir = self.dirs['nuclei'] / self.slide_name
+        return len(list(nuclei_dir.glob("*.png"))) if nuclei_dir.exists() else 0
+
+    def _count_spatil_csvs(self) -> int:
+        spatil_dir = self.dirs['spatil'] / self.slide_name
+        return len(list(spatil_dir.glob("*.csv"))) if spatil_dir.exists() else 0
+
+    def _is_prediction_complete(self, prediction_output: Path) -> bool:
+        if not prediction_output.exists():
+            return False
+        try:
+            df = pd.read_csv(prediction_output)
+            return all(col in df.columns for col in ["patient_id", "risk_score", "risk_group"]) and len(df) > 0
+        except Exception:
+            return False
+
+    def _is_nucdiv_complete(self, csv_output: Path) -> bool:
+        if not csv_output.exists():
+            return False
+        try:
+            df = pd.read_csv(csv_output)
+            return "slide_id" in df.columns and len(df.columns) > 100
+        except Exception:
+            return False
 
 
 class APICPatientPipeline:
@@ -1387,7 +1456,10 @@ Example:
     parser.add_argument("-i", "--input", help="Input slide file")
     parser.add_argument("-o", "--output", required=True, help="Output directory")
     parser.add_argument("--steps", nargs='+', help="Steps to run (default: all)")
-
+    parser.add_argument("--num_processes", type=int, default=12,
+                        help="Number of processes for spaTIL / pipeline logging")
+    parser.add_argument("--steps", nargs='+', help="Steps to run")
+    
     # Patient mode arguments
     parser.add_argument("--patient-aggregate", action="store_true",
                        help="Run patient-level aggregation (multi-slide mode)")
@@ -1408,7 +1480,11 @@ Example:
             sys.exit(1)
 
         try:
-            pipeline = APICResearchPipeline(args.input_dir, args.output)
+            cfg = APICResearchPipeline.DEFAULT_CONFIG.copy()
+            cfg['spatil'] = cfg['spatil'].copy()
+            cfg['spatil']['num_processes'] = args.num_processes
+
+            pipeline = APICResearchPipeline(args.input_dir, args.output, cfg)
             pipeline.run()
         except Exception as e:
             logger.error(f"Research pipeline failed: {e}")
@@ -1423,10 +1499,15 @@ Example:
             sys.exit(1)
 
         try:
+            cfg = APICPatientPipeline.DEFAULT_CONFIG.copy()
+            cfg['spatil'] = cfg['spatil'].copy()
+            cfg['spatil']['num_processes'] = args.num_processes
+
             pipeline = APICPatientPipeline(
                 args.patient_id,
                 args.patient_folder,
-                args.output
+                args.output,
+                cfg
             )
             pipeline.run()
         except Exception as e:
@@ -1446,7 +1527,12 @@ Example:
             sys.exit(1)
 
         try:
-            pipeline = APICPipeline(args.input, args.output)
+            cfg = APICPipeline.DEFAULT_CONFIG.copy()
+            cfg['spatil'] = cfg['spatil'].copy()
+            cfg['spatil']['num_processes'] = args.num_processes
+
+            pipeline = APICPipeline(args.input, args.output, cfg)
+            # pipeline = APICPipeline(args.input, args.output)
             pipeline.run(args.steps)
         except Exception as e:
             logger.error(f"Pipeline failed: {e}")

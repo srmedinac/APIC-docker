@@ -717,7 +717,17 @@ def load_model(path, mode, nr_types):
         
         #net = torch.nn.DataParallel(net, device_ids=[0, 1])
         if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            print(f"CUDA available: True | visible GPUs: {gpu_count}")
             net = net.cuda()
+            if gpu_count > 1:
+                net = torch.nn.DataParallel(net)
+                print("Multi-GPU enabled with DataParallel")
+            else:
+                print("Single-GPU mode")
+        else:
+            print("CUDA available: False | running on CPU")
+        
         return net
 
 
@@ -813,52 +823,123 @@ def processOneTile(tile):
 
     return dataCounter
 
+def build_padded_tile(tile, shift, half_shift):
+    patchSize = tile.size[0]
+    ntile = Image.new('RGB', (patchSize + shift, patchSize + shift))
+    ntile.paste(tile, (half_shift, half_shift))
+    return np.array(ntile), patchSize
+
 if __name__ == '__main__':
     dataPath = sys.argv[1]
     ext = sys.argv[2]
     modelPath = sys.argv[3]
     modelMode = sys.argv[4]
     nr_types = int(sys.argv[5])
-    typeInfoPath = sys.argv[6]
-    outPath = sys.argv[7]
+    batchSize = int(sys.argv[6])
+    typeInfoPath = sys.argv[7]
+    outPath = sys.argv[8]
     
     batchSize=1
-    shift=96
-    half_shift=int(shift/2)
-    batchInfo = [None]*batchSize
+    # shift=96
+    # half_shift=int(shift/2)
+    # batchInfo = [None]*batchSize
 
-    files = sorted(glob.glob(os.path.join(dataPath, '*'+ext)))
+    # files = sorted(glob.glob(os.path.join(dataPath, '*'+ext)))
+    # print(f'{len(files)} files have been read.')
+    
+    # endInd = len(files)
+    
+    # with open(typeInfoPath) as f:
+    #     type_info = geojson.load(f)
+    # print('Type info has been loaded.')
+
+    # model = load_model(modelPath, modelMode, nr_types=nr_types)
+    # print('Model has been loaded.')
+    # print('Processing slide: ', dataPath)
+    # for i in tqdm(range(0, endInd), desc="Segmenting tiles", file=sys.stdout, ncols=80, position=0, leave=True):
+    #     sampleName = os.path.basename(files[i]).replace(ext,"")
+    
+    #     sampleOutputPath = os.path.join(outPath, sampleName + '.png')
+        
+    #     tile=Image.open(files[i])
+                
+    #     patchSize=tile.size[0] #This assumes a square tile
+    #     batch = np.zeros((batchSize, patchSize+shift, patchSize+shift, 3))
+          
+    #     ntile=Image.new('RGB', (patchSize+shift, patchSize+shift))
+    #     ntile.paste(tile,(half_shift,half_shift))
+                                
+    #     dataCounter = processOneTile(ntile)
+            
+    #     if dataCounter > 0:
+    #         value=json.dumps(GEOData[:dataCounter])
+            
+    #         im=get_img_from_json_coords(patchSize+shift,patchSize+shift,value)
+    #         nim = im[half_shift:patchSize+half_shift,half_shift:patchSize+half_shift]
+    #         plt.imsave(sampleOutputPath, nim, cmap='gray')
+    shift = 96
+    half_shift = int(shift / 2)
+    files = sorted(glob.glob(os.path.join(dataPath, '*' + ext)))
     print(f'{len(files)} files have been read.')
-    
-    endInd = len(files)
-    
+
     with open(typeInfoPath) as f:
         type_info = geojson.load(f)
     print('Type info has been loaded.')
 
     model = load_model(modelPath, modelMode, nr_types=nr_types)
     print('Model has been loaded.')
+    print(f'Batch size: {batchSize}')
     print('Processing slide: ', dataPath)
-    for i in tqdm(range(0, endInd), desc="Segmenting tiles", file=sys.stdout, ncols=80, position=0, leave=True):
-        sampleName = os.path.basename(files[i]).replace(ext,"")
-    
-        sampleOutputPath = os.path.join(outPath, sampleName + '.png')
-        
-        tile=Image.open(files[i])
-                
-        patchSize=tile.size[0] #This assumes a square tile
-        batch = np.zeros((batchSize, patchSize+shift, patchSize+shift, 3))
-          
-        ntile=Image.new('RGB', (patchSize+shift, patchSize+shift))
-        ntile.paste(tile,(half_shift,half_shift))
-                                
-        dataCounter = processOneTile(ntile)
-            
-        if dataCounter > 0:
-            value=json.dumps(GEOData[:dataCounter])
-            
-            im=get_img_from_json_coords(patchSize+shift,patchSize+shift,value)
-            nim = im[half_shift:patchSize+half_shift,half_shift:patchSize+half_shift]
-            plt.imsave(sampleOutputPath, nim, cmap='gray')
-        
+
+    for start_idx in tqdm(range(0, len(files), batchSize), desc="Segmenting tiles",
+                          file=sys.stdout, ncols=80, position=0, leave=True):
+        batch_files = files[start_idx:start_idx + batchSize]
+        batch_tiles = []
+        batch_names = []
+        batch_patch_sizes = []
+
+        for f in batch_files:
+            tile = Image.open(f)
+            padded_tile, patchSize = build_padded_tile(tile, shift, half_shift)
+            batch_tiles.append(padded_tile)
+            batch_names.append(os.path.basename(f).replace(ext, ""))
+            batch_patch_sizes.append(patchSize)
+
+        batch = np.stack(batch_tiles, axis=0)
+        batchInfo = [(0, 0)] * len(batch_files)
+
+        predInfoList = infer_step(batch)
+
+        for predInfo, sampleName, patchSize in zip(predInfoList, batch_names, batch_patch_sizes):
+            sampleOutputPath = os.path.join(outPath, sampleName + '.png')
+            dataCounter = 0
+
+            for bi, predi in zip([(0, 0)], [predInfo]):
+                for key, value in predi.items():
+                    if len(value['contour']) < 10:
+                        continue
+                    cc = np.array(value['contour'])
+                    cc += [bi[0] + 92 // 2, bi[1] + 92 // 2]
+                    cc = cc.tolist()
+                    cc.append(cc[0])
+
+                    dict_data = {
+                        "type": "Feature",
+                        "id": "PathCellObject",
+                        "geometry": {"type": "Polygon", "coordinates": [cc]},
+                        "properties": {
+                            "isLocked": "false",
+                            "measurements": [],
+                            "classification": {"name": type_info[str(value['type'])][0]}
+                        }
+                    }
+                    GEOData[dataCounter] = dict_data
+                    dataCounter += 1
+
+            if dataCounter > 0:
+                value = json.dumps(GEOData[:dataCounter])
+                im = get_img_from_json_coords(patchSize + shift, patchSize + shift, value)
+                nim = im[half_shift:patchSize + half_shift, half_shift:patchSize + half_shift]
+                plt.imsave(sampleOutputPath, nim, cmap='gray')
+
 print("Nucleus segmentation done!")

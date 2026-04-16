@@ -220,6 +220,20 @@ docker run --gpus all \
   -o /data/output \
   --multi-slide
 ```
+#### Modified run command:
+
+```bash
+docker run --gpus all \
+  --user "$(id -u):$(id -g)" \
+  -e UMASK=0002 \
+  -v /path/to/slides:/data/input_slides:ro \
+  -v /path/to/output:/data/output \
+  madabhushilabapic/apic:latest \
+  -i "/data/input_slides/" \
+  -o /data/output \
+  --multi-slide
+  --num_processes 12
+```
 
 **Input structure:**
 ```
