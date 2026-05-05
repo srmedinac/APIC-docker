@@ -1,10 +1,17 @@
 import math, sys, time, glob, os
+
+# Enable multithreading for numpy and OpenCV before importing them
+os.environ['OPENBLAS_NUM_THREADS'] = '4'
+os.environ['MKL_NUM_THREADS'] = '4'
+os.environ['NUMEXPR_NUM_THREADS'] = '4'
+os.environ['OMP_NUM_THREADS'] = '4'
+
 import warnings
 import geojson
-import matplotlib.pyplot as plt
 from PIL import ImageStat, Image
 from skimage.measure import approximate_polygon
 import cv2
+cv2.setNumThreads(4)  # Optimize OpenCV threading
 import numpy as np
 import torch
 import torch.nn as nn
@@ -727,7 +734,10 @@ def load_model(path, mode, nr_types):
                 print("Single-GPU mode")
         else:
             print("CUDA available: False | running on CPU")
-        
+
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
+
         return net
 
 
@@ -739,7 +749,7 @@ def infer_step(patch_imgs):
     model.eval()  # infer mode
 
     # --------------------------------------------------------------
-    with torch.no_grad():  # dont compute gradient
+    with torch.inference_mode():
         device = next(model.parameters()).device ## added to run patch_imgs on same device as model
         patch_imgs_gpu = patch_imgs_gpu.to(device) ## added to run patch_imgs on same device as model
         pred_dict = model(patch_imgs_gpu)
@@ -829,6 +839,30 @@ def build_padded_tile(tile, shift, half_shift):
     ntile.paste(tile, (half_shift, half_shift))
     return np.array(ntile), patchSize
 
+
+def render_pred_info_mask(pred_info, type_info, patch_size, shift, half_shift):
+    """Render nuclei type contours directly into an output mask."""
+    padded_size = patch_size + shift
+    mask = np.zeros((padded_size, padded_size), dtype=np.uint8)
+
+    for value in pred_info.values():
+        contour = value.get('contour')
+        nucleus_type = value.get('type')
+        if contour is None or nucleus_type is None or len(contour) < 10:
+            continue
+
+        type_meta = type_info.get(str(nucleus_type))
+        if type_meta is None:
+            continue
+
+        contour = np.asarray(contour, dtype=np.int32)
+        contour[:, 0] += half_shift
+        contour[:, 1] += half_shift
+        fill_value = int(nucleus_type) + 1
+        cv2.fillPoly(mask, [contour], fill_value)
+
+    return mask[half_shift:patch_size + half_shift, half_shift:patch_size + half_shift]
+
 if __name__ == '__main__':
     dataPath = sys.argv[1]
     ext = sys.argv[2]
@@ -838,8 +872,7 @@ if __name__ == '__main__':
     batchSize = int(sys.argv[6])
     typeInfoPath = sys.argv[7]
     outPath = sys.argv[8]
-    
-    batchSize=1
+
     # shift=96
     # half_shift=int(shift/2)
     # batchInfo = [None]*batchSize
@@ -899,8 +932,8 @@ if __name__ == '__main__':
         batch_patch_sizes = []
 
         for f in batch_files:
-            tile = Image.open(f)
-            padded_tile, patchSize = build_padded_tile(tile, shift, half_shift)
+            with Image.open(f) as tile:
+                padded_tile, patchSize = build_padded_tile(tile.convert("RGB"), shift, half_shift)
             batch_tiles.append(padded_tile)
             batch_names.append(os.path.basename(f).replace(ext, ""))
             batch_patch_sizes.append(patchSize)
@@ -912,34 +945,8 @@ if __name__ == '__main__':
 
         for predInfo, sampleName, patchSize in zip(predInfoList, batch_names, batch_patch_sizes):
             sampleOutputPath = os.path.join(outPath, sampleName + '.png')
-            dataCounter = 0
-
-            for bi, predi in zip([(0, 0)], [predInfo]):
-                for key, value in predi.items():
-                    if len(value['contour']) < 10:
-                        continue
-                    cc = np.array(value['contour'])
-                    cc += [bi[0] + 92 // 2, bi[1] + 92 // 2]
-                    cc = cc.tolist()
-                    cc.append(cc[0])
-
-                    dict_data = {
-                        "type": "Feature",
-                        "id": "PathCellObject",
-                        "geometry": {"type": "Polygon", "coordinates": [cc]},
-                        "properties": {
-                            "isLocked": "false",
-                            "measurements": [],
-                            "classification": {"name": type_info[str(value['type'])][0]}
-                        }
-                    }
-                    GEOData[dataCounter] = dict_data
-                    dataCounter += 1
-
-            if dataCounter > 0:
-                value = json.dumps(GEOData[:dataCounter])
-                im = get_img_from_json_coords(patchSize + shift, patchSize + shift, value)
-                nim = im[half_shift:patchSize + half_shift, half_shift:patchSize + half_shift]
-                plt.imsave(sampleOutputPath, nim, cmap='gray')
+            nim = render_pred_info_mask(predInfo, type_info, patchSize, shift, half_shift)
+            if np.any(nim):
+                cv2.imwrite(sampleOutputPath, nim)
 
 print("Nucleus segmentation done!")

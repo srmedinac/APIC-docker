@@ -11,10 +11,18 @@
 
 import os
 import sys
+
+# Enable multithreading for numpy, OpenCV, and scipy before importing them
+os.environ['OPENBLAS_NUM_THREADS'] = '4'
+os.environ['MKL_NUM_THREADS'] = '4'
+os.environ['NUMEXPR_NUM_THREADS'] = '4'
+os.environ['OMP_NUM_THREADS'] = '4'
+
 import logging
 import subprocess
 import numpy as np
 import cv2
+cv2.setNumThreads(4)  # Optimize OpenCV threading
 from scipy import stats, sparse
 from scipy.spatial.distance import pdist, squareform
 from skimage import measure

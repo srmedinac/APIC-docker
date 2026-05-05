@@ -1,5 +1,12 @@
 import os
 import sys
+
+# Enable multithreading for numpy, OpenCV, and scipy before importing them
+os.environ['OPENBLAS_NUM_THREADS'] = '4'
+os.environ['MKL_NUM_THREADS'] = '4'
+os.environ['NUMEXPR_NUM_THREADS'] = '4'
+os.environ['OMP_NUM_THREADS'] = '4'
+
 import argparse
 import logging
 import subprocess
@@ -44,12 +51,18 @@ class BiomarkerPipelineStep1_2:
     
     def load_config(self, config_path):
         # minimal config needed for steps 1 & 2
+        # Detect available CPUs and set num_workers intelligently
+        import multiprocessing
+        available_cpus = multiprocessing.cpu_count()
+        # Use 8-16 workers depending on available cores, leave some for system
+        num_workers = max(8, min(16, available_cpus - 4))
+        
         default_config = {
             'pipeline': {'resume_on_existing': True},
             'tissue_segmentation': {'level': 2},
             'patch_extraction': {
                 'level': 0, 'patch_size': 1024, 'overlap': 0,
-                'max_background': 0.75, 'num_workers': 4
+                'max_background': 0.75, 'num_workers': num_workers
             },
         }
         # you can later add YAML loading if needed
@@ -151,7 +164,7 @@ class BiomarkerPipelineStep1_2:
         """Step 2: Patch extraction using the HistoQC mask"""
         logger.info("[STEP2] Patch extraction")
 
-        # expected_tiles_dir = self.dirs['patches'] / self.slide_name / "tiles"
+        expected_tiles_dir = self.dirs['patches'] / self.slide_name / "tiles"
         # if self._skip_if_exists(expected_tiles_dir) and any(expected_tiles_dir.glob("*.jpeg")):
         #     logger.info("[STEP2] Patches already exist, skipping.")
         #     return
@@ -264,14 +277,14 @@ class BiomarkerPipelineStep1_2:
                 if patch_path.exists():
                     existing += 1
                 else:
-                    region.save(tiles_dir / patch_name, "JPEG")
+                    region.save(patch_path, "JPEG")
                     newly_saved += 1
                 kept += 1
 
                 x += stride
             y += stride
 
-            logger.info(
+        logger.info(
             f"[STEP2] Patch extraction complete | expected valid patches={kept} | "
             f"existing={existing} | newly_saved={newly_saved} | "
             f"evaluated_positions={total}"

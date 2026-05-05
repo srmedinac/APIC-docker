@@ -4,6 +4,16 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
 # -------------------------------------------------------------------
+# Performance Optimization: Enable multithreading
+# -------------------------------------------------------------------
+ENV OMP_NUM_THREADS=4
+ENV OPENBLAS_NUM_THREADS=4
+ENV MKL_NUM_THREADS=4
+ENV NUMEXPR_NUM_THREADS=4
+ENV VECLIB_MAXIMUM_THREADS=4
+ENV BLIS_NUM_THREADS=4
+
+# -------------------------------------------------------------------
 # MATLAB Runtime (already present in base image) + baked env vars
 # -------------------------------------------------------------------
 ENV AGREE_TO_MATLAB_RUNTIME_LICENSE=yes

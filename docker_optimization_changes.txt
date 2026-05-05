@@ -1,0 +1,42 @@
+Docker Container Optimization Changes
+
+The following changes were made to optimize the APIC Docker container for a 32-core, 125GB RAM environment:
+
+1. Dockerfile
+   - Added container-wide threading environment variables:
+     - OMP_NUM_THREADS=4
+     - OPENBLAS_NUM_THREADS=4
+     - MKL_NUM_THREADS=4
+     - NUMEXPR_NUM_THREADS=4
+     - VECLIB_MAXIMUM_THREADS=4
+     - BLIS_NUM_THREADS=4
+
+2. run_pipeline_docker.sh
+   - Updated resolve_num_processes() so CPU worker count scales to 24+ on 32 cores rather than capping at 8.
+   - Updated configure_thread_env() to default threading variables to 4 instead of 1.
+
+3. feature_extraction_prediction.py
+   - Added global multithreading environment variable defaults for NumPy/SciPy/OpenCV.
+   - Updated recommend_num_processes() to use higher worker counts for 32 cores.
+   - Updated default spaTIL num_processes from 12 to 24.
+
+4. src/spatil/spatil_main_adapted.py
+   - Increased default num_processes from 12 to 24 for spaTIL feature extraction.
+   - Added local threading environment variable defaults for worker processes.
+
+5. src/nucleusSegmentationTiles.py
+   - Enabled threading environment variables before importing NumPy/OpenCV.
+   - Added cv2.setNumThreads(4) to optimize OpenCV execution.
+
+6. src/nuclear_diversity.py
+   - Enabled threading environment variables before importing NumPy/OpenCV.
+   - Added cv2.setNumThreads(4) for performance.
+
+7. tissue_segmentation_patches.py
+   - Enabled threading environment variables before importing NumPy/OpenCV.
+   - Updated patch extraction config to auto-scale num_workers to 8-16 based on available CPU cores.
+
+8. Documentation
+   - Created OPTIMIZATION_GUIDE.md, OPTIMIZATION_SUMMARY.md, and CONTAINER_OPTIMIZATION_COMPLETE.md with full optimization notes.
+
+These changes collectively improve CPU utilization, reduce bottlenecks in Steps 3 and 4, and make the container run more efficiently on high-core, high-memory hosts.

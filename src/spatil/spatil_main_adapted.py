@@ -11,8 +11,16 @@ Usage:
 """
 
 import os
+
+# Enable multithreading for numpy, OpenCV, and scipy before importing them
+os.environ['OPENBLAS_NUM_THREADS'] = '2'
+os.environ['MKL_NUM_THREADS'] = '2'
+os.environ['NUMEXPR_NUM_THREADS'] = '2'
+os.environ['OMP_NUM_THREADS'] = '2'
+
 from os.path import join, isfile
 import cv2
+cv2.setNumThreads(2)  # Optimize OpenCV threading for worker processes
 import numpy as np
 import argparse
 import sys
@@ -291,7 +299,7 @@ def main():
     parser.add_argument("--alpha", nargs=2, type=float, default=[0.56, 0.56], help="Alpha parameters")
     parser.add_argument("--r", type=float, default=0.07, help="R parameter")
     parser.add_argument("--draw_option", type=int, default=0, help="Draw option (0=no viz, 1=save viz)")
-    parser.add_argument("--num_processes", type=int, default=12, help="Number of processes")
+    parser.add_argument("--num_processes", type=int, default=24, help="Number of processes for multiprocessing")
     parser.add_argument("--num_viz_patches", type=int, default=10, help="Number of patches to visualize")
 
     args = parser.parse_args()

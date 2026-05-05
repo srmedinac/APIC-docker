@@ -20,8 +20,10 @@ NEG_FILL = colors.HexColor("#5a97ac")
 
 BAR_X, BAR_Y = (10*mm, PAGE_H - 270*mm)
 BAR_W, BAR_H = (12*mm, 40*mm)
-BIOPSY_IMG_FRAME = (45*mm, PAGE_H - 270*mm, 85*mm, 48*mm)
-GRID_X, GRID_Y = (142*mm, PAGE_H - 242*mm)
+# Biopsy frame adjusted to prevent overlap with interpretation/QC section
+# Y coordinate moved up (higher value) and height reduced for better spacing
+BIOPSY_IMG_FRAME = (45*mm, PAGE_H - 150*mm, 75*mm, 35*mm)
+GRID_X, GRID_Y = (142*mm, PAGE_H - 240*mm)
 CELL_W, CELL_H, CELL_GAP = (22*mm, 22*mm, 7*mm)
 
 
@@ -31,7 +33,7 @@ def _pil_reader(img: Image.Image) -> ImageReader:
     bio.seek(0)
     return ImageReader(bio)
 
-def rasterize_page(pdf_path: Path, page_index: int, dpi=300) -> ImageReader:
+def rasterize_page(pdf_path: Path, page_index: int, dpi=150) -> ImageReader:
     doc = fitz.open(pdf_path)
     page = doc[page_index]
     pm = page.get_pixmap(matrix=fitz.Matrix(dpi/72.0, dpi/72.0), alpha=False)
@@ -256,13 +258,28 @@ def draw_biopsy_overlay(c: canvas.Canvas, qc_dir: Path, patient_id: str, frame):
 
 
 def draw_spatil_grid(c: canvas.Canvas, viz_dir: Path):
-    """Draw 2x2 grid of spatil visualizations."""
-    imgs = sorted(viz_dir.glob("*.png"))[:4]
-    for i, p in enumerate(imgs):
+    """Draw 2x2 grid: nuclei overlays on top, spaTIL visualizations on bottom."""
+    # Top row: nuclei overlays (up to 2)
+    nuclei_overlay_dir = viz_dir / "nuclei_overlays"
+    nuclei_imgs = sorted(nuclei_overlay_dir.glob("*.png"))[:2] if nuclei_overlay_dir.exists() else []
+    
+    # Bottom row: spatil visualizations (up to 2)
+    spatil_imgs = sorted(viz_dir.glob("*.png"))[:2]
+    
+    # Pad with None if not enough images
+    nuclei_imgs = nuclei_imgs + [None] * (2 - len(nuclei_imgs))
+    spatil_imgs = spatil_imgs + [None] * (2 - len(spatil_imgs))
+    
+    # Draw grid: nuclei on top (row 0), spatil on bottom (row 1)
+    grid_images = [nuclei_imgs[0], nuclei_imgs[1], spatil_imgs[0], spatil_imgs[1]]
+    
+    for i, img_path in enumerate(grid_images):
+        if img_path is None:
+            continue
         row, col = divmod(i, 2)
         xx = GRID_X + col*(CELL_W + CELL_GAP)
         yy = GRID_Y - row*(CELL_H + CELL_GAP)
-        draw_image_keep_ar(c, p, xx, yy, CELL_W, CELL_H)
+        draw_image_keep_ar(c, img_path, xx, yy, CELL_W, CELL_H)
 
 
 def make_report_for_patient(pdir: Path, page1_template_pos: Path, page1_template_neg: Path, page2_template: Path, out_root: Path):
