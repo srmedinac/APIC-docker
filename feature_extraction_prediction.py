@@ -19,6 +19,7 @@ import re
 import subprocess
 import shutil
 import time
+import copy
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,12 @@ import pandas as pd
 import scipy.io as sio
 import warnings
 from PIL import Image
+
+# Enable multithreading for numpy, OpenCV, and scipy
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '4')
+os.environ.setdefault('MKL_NUM_THREADS', '4')
+os.environ.setdefault('NUMEXPR_NUM_THREADS', '4')
+os.environ.setdefault('OMP_NUM_THREADS', '4')
 
 # Suppress common library warnings for cleaner output
 warnings.filterwarnings('ignore', category=DeprecationWarning)
@@ -36,6 +43,146 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow logging
 
 # Allow large images
 Image.MAX_IMAGE_PIXELS = None
+
+
+def detect_available_cpus() -> int:
+    """Best-effort CPU detection that respects container limits when possible."""
+    cpu_count = os.cpu_count() or 1
+
+    try:
+        affinity_count = len(os.sched_getaffinity(0))
+        if affinity_count > 0:
+            cpu_count = min(cpu_count, affinity_count)
+    except (AttributeError, OSError):
+        pass
+
+    cgroup_cpu_paths = (
+        Path("/sys/fs/cgroup/cpu.max"),
+        Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"),
+    )
+
+    cpu_max_path = cgroup_cpu_paths[0]
+    if cpu_max_path.exists():
+        try:
+            quota_str, period_str = cpu_max_path.read_text().strip().split()
+            if quota_str != "max":
+                quota = int(quota_str)
+                period = int(period_str)
+                if quota > 0 and period > 0:
+                    limited_cpus = max(1, quota // period)
+                    cpu_count = min(cpu_count, limited_cpus)
+        except (OSError, ValueError):
+            pass
+    else:
+        quota_path = cgroup_cpu_paths[1]
+        period_path = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+        if quota_path.exists() and period_path.exists():
+            try:
+                quota = int(quota_path.read_text().strip())
+                period = int(period_path.read_text().strip())
+                if quota > 0 and period > 0:
+                    limited_cpus = max(1, quota // period)
+                    cpu_count = min(cpu_count, limited_cpus)
+            except (OSError, ValueError):
+                pass
+
+    return max(1, cpu_count)
+
+
+def recommend_num_processes() -> int:
+    """Choose a portable spaTIL worker count without oversubscribing the host."""
+    cpu_count = detect_available_cpus()
+    if cpu_count <= 2:
+        return 1
+    if cpu_count <= 4:
+        return max(1, cpu_count - 1)
+    if cpu_count <= 8:
+        return min(8, cpu_count - 1)
+    if cpu_count <= 16:
+        return max(12, cpu_count - 4)  # Leave 4 cores for system
+    # For 32+ cores, use 24-28 for optimal throughput
+    return max(24, cpu_count - 4)
+
+
+def recommend_nuclei_batch_size() -> int:
+    """Choose a HoVerNet batch size based on available accelerator memory or CPU."""
+    try:
+        import torch
+    except Exception:
+        # No GPU available, use conservative CPU batch processing
+        return 2
+
+    if not torch.cuda.is_available():
+        # No GPU, CPU-based inference
+        # For CPU, batch size 2 is typically optimal to balance memory and compute
+        return 2
+
+    try:
+        total_vram_gb = min(
+            torch.cuda.get_device_properties(i).total_memory
+            for i in range(torch.cuda.device_count())
+        ) / (1024 ** 3)
+    except Exception:
+        return 2
+
+    if total_vram_gb >= 24:
+        return 8
+    if total_vram_gb >= 16:
+        return 4
+    if total_vram_gb >= 12:
+        return 4
+    if total_vram_gb >= 8:
+        return 2
+    if total_vram_gb >= 4:
+        return 2
+    return 1
+
+
+def get_nuclei_batch_candidates(initial_batch_size: int) -> list[int]:
+    """Return descending batch sizes to try for HoVerNet."""
+    candidates = []
+    batch_size = max(1, int(initial_batch_size))
+
+    while batch_size >= 1:
+        if batch_size not in candidates:
+            candidates.append(batch_size)
+        if batch_size == 1:
+            break
+        batch_size = max(1, batch_size // 2)
+
+    return candidates
+
+
+def resolve_runtime_config(base_config: dict, requested_num_processes=None,
+                           requested_nuclei_batch_size=None) -> dict:
+    """Return a config with runtime-adaptive parallelism unless explicitly overridden."""
+    cfg = copy.deepcopy(base_config)
+
+    env_num_processes = os.getenv("APIC_NUM_PROCESSES")
+    env_batch_size = os.getenv("APIC_NUCLEI_BATCH_SIZE")
+
+    if requested_num_processes is None:
+        if env_num_processes and env_num_processes.lower() != "auto":
+            requested_num_processes = int(env_num_processes)
+        else:
+            requested_num_processes = recommend_num_processes()
+
+    if requested_nuclei_batch_size is None:
+        if env_batch_size and env_batch_size.lower() != "auto":
+            requested_nuclei_batch_size = int(env_batch_size)
+        else:
+            requested_nuclei_batch_size = recommend_nuclei_batch_size()
+
+    cfg['spatil']['num_processes'] = max(1, int(requested_num_processes))
+    cfg['nuclei_segmentation']['batch_size'] = max(1, int(requested_nuclei_batch_size))
+
+    logger.info(
+        "Runtime configuration: cpus=%s, spaTIL processes=%s, nuclei batch_size=%s",
+        detect_available_cpus(),
+        cfg['spatil']['num_processes'],
+        cfg['nuclei_segmentation']['batch_size'],
+    )
+    return cfg
 
 def setup_logging():
     """Configure logging with timestamps and flush-on-write."""
@@ -194,15 +341,15 @@ class APICPipeline:
         'nuclei_segmentation': {
             'model_path': 'models/hovernet_fast_pannuke_type_tf2pytorch.tar',
             'mode': 'fast',
-            'batch_size': 6,
+            'batch_size': 2,
             'type_info_path': 'types/type_info_pannuke.json'
         },
         'spatil': {
             'alpha': [0.56, 0.56],
             'r': 0.07,
-            'num_processes': 12,
+            'num_processes': 24,  # Optimized for 32-core systems; will auto-adjust via recommend_num_processes()
             'draw_option': 1,
-            'num_viz_patches': 10
+            'num_viz_patches': 2  # Generate 2 spatil viz (top row); nuclei overlays fill bottom row
         },
         'nuclear_diversity': {
             'use_matlab': True
@@ -298,23 +445,47 @@ class APICPipeline:
             if not link.exists():
                 link.symlink_to(patch.resolve())
 
-        # Run HoVerNet
+        # Run HoVerNet with automatic batch-size fallback on GPU OOM.
         cfg = self.config['nuclei_segmentation']
-        cmd = [
-            sys.executable, "src/nucleusSegmentationTiles.py",
-            str(temp_dir), '.jpeg',
-            cfg['model_path'], cfg['mode'],
-            str(cfg['batch_size']), cfg['type_info_path'],
-            str(output_dir)
-        ]
+        batch_candidates = get_nuclei_batch_candidates(cfg['batch_size'])
 
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = "0"
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        logger.info(f"CUDA_VISIBLE_DEVICES: {env.get('CUDA_VISIBLE_DEVICES', 'not set (using all visible GPUs)')}")
+        logger.info(f"Step 3 batch-size candidates: {batch_candidates}")
 
-        run_subprocess(cmd, "HoVerNet nuclei segmentation", env=env)
+        try:
+            last_error = None
+            for batch_size in batch_candidates:
+                cmd = [
+                    sys.executable, "src/nucleusSegmentationTiles.py",
+                    str(temp_dir), '.jpeg',
+                    cfg['model_path'], cfg['mode'],
+                    str(6),
+                    str(batch_size),
+                    cfg['type_info_path'],
+                    str(output_dir)
+                ]
+                try:
+                    logger.info(f"Running HoVerNet with batch_size={batch_size}")
+                    run_subprocess(cmd, "HoVerNet nuclei segmentation", env=env)
+                    cfg['batch_size'] = batch_size
+                    last_error = None
+                    break
+                except subprocess.CalledProcessError as e:
+                    last_error = e
+                    if batch_size == 1:
+                        raise
+                    logger.warning(
+                        "HoVerNet failed with batch_size=%s. Retrying with a smaller batch size.",
+                        batch_size,
+                    )
 
-        # Cleanup
-        shutil.rmtree(temp_dir)
+            if last_error is not None:
+                raise last_error
+        finally:
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir)
 
         final_count = len(list(output_dir.glob("*.png")))
         log_step_complete("Nuclei segmentation", time.time() - start)
@@ -327,8 +498,22 @@ class APICPipeline:
 
         output_dir = self.dirs['spatil'] / self.slide_name
 
-        if self._should_skip(output_dir) and any(output_dir.glob("*.csv")):
-            logger.info("Already complete: spaTIL features exist")
+        # if self._should_skip(output_dir) and any(output_dir.glob("*.csv")):
+        #     logger.info("Already complete: spaTIL features exist")
+        #     return
+
+        patch_count = self._count_patch_tiles()
+        nuclei_count = self._count_nuclei_masks()
+        existing_spatil = self._count_spatil_csvs()
+
+        logger.info(f"spaTIL completeness check: patches={patch_count}, nuclei_masks={nuclei_count}, spatil_csvs={existing_spatil}")
+
+        if nuclei_count == 0:
+            raise RuntimeError("No nuclei masks found. Run nuclei step first.")
+
+        # Always call spaTIL when resume is enabled unless truly complete.
+        if existing_spatil == nuclei_count and nuclei_count > 0:
+            logger.info("spaTIL already complete")
             return
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -357,6 +542,68 @@ class APICPipeline:
         log_step_complete("spaTIL features", time.time() - start)
         logger.info(f"Output: {feature_count} feature files, {viz_count} visualizations")
 
+    def _generate_nuclei_overlays(self):
+        """Generate simple nuclei segmentation overlays for the same patches as spaTIL viz."""
+        import cv2
+
+        viz_dir = self.dirs['spatil_viz'] / self.slide_name
+        if not viz_dir.exists() or len(list(viz_dir.glob("*.png"))) == 0:
+            logger.info("No spatil visualizations found - skipping nuclei overlays")
+            return
+
+        # Get first 2 spatil viz patch names
+        spatil_viz_files = sorted(viz_dir.glob("*.png"))[:2]
+        if not spatil_viz_files:
+            return
+
+        nuclei_overlay_dir = self.dirs['spatil_viz'] / self.slide_name / "nuclei_overlays"
+        nuclei_overlay_dir.mkdir(parents=True, exist_ok=True)
+
+        for viz_file in spatil_viz_files:
+            patch_name = viz_file.stem  # e.g., "tile_0001"
+            
+            # Load original patch image
+            patch_path = self.dirs['patches'] / self.slide_name / "tiles" / f"{patch_name}.jpeg"
+            nuclei_mask_path = self.dirs['nuclei'] / self.slide_name / f"{patch_name}.png"
+
+            if not patch_path.exists() or not nuclei_mask_path.exists():
+                logger.warning(f"Skipping nuclei overlay {patch_name}: missing patch or mask")
+                continue
+
+            try:
+                # Read and process
+                patch = cv2.imread(str(patch_path))
+                nuclei_mask = cv2.imread(str(nuclei_mask_path), cv2.IMREAD_GRAYSCALE)
+
+                if patch is None or nuclei_mask is None:
+                    logger.warning(f"Failed to load {patch_name}")
+                    continue
+
+                # Scale up to match spatil viz size for better visibility in report grid
+                target_size = 2400  # Match spatil viz resolution (~2310x2310)
+                patch_h, patch_w = patch.shape[:2]
+                scale_factor = target_size / max(patch_h, patch_w)
+                
+                scaled_patch = cv2.resize(patch, (int(patch_w * scale_factor), int(patch_h * scale_factor)), 
+                                         interpolation=cv2.INTER_CUBIC)
+                scaled_nuclei_mask = cv2.resize(nuclei_mask, (int(patch_w * scale_factor), int(patch_h * scale_factor)),
+                                               interpolation=cv2.INTER_NEAREST)
+
+                # Create overlay: green nuclei contours on scaled original
+                _, mask_binary = cv2.threshold(scaled_nuclei_mask, 127, 255, cv2.THRESH_BINARY)
+                contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
+                overlay = scaled_patch.copy()
+                cv2.drawContours(overlay, contours, -1, (0, 255, 0), 3)  # Green nuclei (thicker for visibility)
+
+                # Save
+                overlay_path = nuclei_overlay_dir / f"{patch_name}.png"
+                cv2.imwrite(str(overlay_path), overlay)
+                logger.info(f"Generated nuclei overlay: {overlay_path.name} ({overlay.shape[1]}x{overlay.shape[0]})")
+
+            except Exception as e:
+                logger.warning(f"Error generating nuclei overlay for {patch_name}: {e}")
+
     def step5_nucdiv_features(self):
         """Extract nuclear diversity features using MATLAB or Python."""
         log_step_header("Nuclear Diversity Features", 5)
@@ -374,9 +621,13 @@ class APICPipeline:
         else:
             mat_output = None
 
-        # Skip if already done
-        if self._should_skip(csv_output):
-            logger.info(f"Already complete: {csv_output.name} exists")
+        # # Skip if already done
+        # if self._should_skip(csv_output):
+        #     logger.info(f"Already complete: {csv_output.name} exists")
+        #     return
+
+        if self._is_nucdiv_complete(csv_output):
+            logger.info(f"Nuclear diversity already complete: {csv_output.name}")
             return
 
         temp_dir = None
@@ -450,8 +701,20 @@ class APICPipeline:
         spatil_exists = self._should_skip(spatil_output)
         nucdiv_exists = self._should_skip(nucdiv_output)
 
-        if spatil_exists and nucdiv_exists:
-            logger.info("Already complete: aggregated features exist")
+        # if spatil_exists and nucdiv_exists:
+        #     logger.info("Already complete: aggregated features exist")
+        #     return
+
+        nuclei_count = self._count_nuclei_masks()
+        spatil_count = self._count_spatil_csvs()
+
+        if nuclei_count == 0:
+            raise RuntimeError("No nuclei masks found for aggregation checks.")
+
+        if spatil_count != nuclei_count:
+            logger.info(f"spaTIL aggregation blocked: only {spatil_count}/{nuclei_count} patch CSVs exist")
+        elif spatil_exists and nucdiv_exists:
+            logger.info("Aggregated features already complete")
             return
 
         # Aggregate spaTIL features (if not already done)
@@ -498,8 +761,12 @@ class APICPipeline:
 
         prediction_output = self.dirs['final'] / f"{self.slide_name}_prediction.csv"
 
-        if self._should_skip(prediction_output):
-            logger.info("Already complete: prediction exists")
+        # if self._should_skip(prediction_output):
+        #     logger.info("Already complete: prediction exists")
+        #     return
+
+        if self._is_prediction_complete(prediction_output):
+            logger.info("Prediction already complete")
             return
 
         # Load features
@@ -667,6 +934,9 @@ class APICPipeline:
 
             try:
                 step_map[step]()
+                # After spatil, generate nuclei overlays for report
+                if step == 'spatil':
+                    self._generate_nuclei_overlays()
             except Exception as e:
                 logger.error(f"Step '{step}' failed: {e}")
                 raise
@@ -705,6 +975,36 @@ class APICPipeline:
                 logger.info(f"  ✗ {name}: missing")
 
         logger.info("=" * 60)
+    
+    def _count_patch_tiles(self) -> int:
+        patches_dir = self.dirs['patches'] / self.slide_name / "tiles"
+        return len(list(patches_dir.glob("*.jpeg"))) if patches_dir.exists() else 0
+
+    def _count_nuclei_masks(self) -> int:
+        nuclei_dir = self.dirs['nuclei'] / self.slide_name
+        return len(list(nuclei_dir.glob("*.png"))) if nuclei_dir.exists() else 0
+
+    def _count_spatil_csvs(self) -> int:
+        spatil_dir = self.dirs['spatil'] / self.slide_name
+        return len(list(spatil_dir.glob("*.csv"))) if spatil_dir.exists() else 0
+
+    def _is_prediction_complete(self, prediction_output: Path) -> bool:
+        if not prediction_output.exists():
+            return False
+        try:
+            df = pd.read_csv(prediction_output)
+            return all(col in df.columns for col in ["patient_id", "risk_score", "risk_group"]) and len(df) > 0
+        except Exception:
+            return False
+
+    def _is_nucdiv_complete(self, csv_output: Path) -> bool:
+        if not csv_output.exists():
+            return False
+        try:
+            df = pd.read_csv(csv_output)
+            return "slide_id" in df.columns and len(df.columns) > 100
+        except Exception:
+            return False
 
 
 class APICPatientPipeline:
@@ -1387,7 +1687,12 @@ Example:
     parser.add_argument("-i", "--input", help="Input slide file")
     parser.add_argument("-o", "--output", required=True, help="Output directory")
     parser.add_argument("--steps", nargs='+', help="Steps to run (default: all)")
-
+    parser.add_argument("--num_processes", type=int,
+                        help="Number of spaTIL worker processes (default: auto)")
+    parser.add_argument("--nuclei-batch-size", type=int,
+                        help="HoVerNet nuclei segmentation batch size (default: auto)")
+    # parser.add_argument("--steps", nargs='+', help="Steps to run")
+    
     # Patient mode arguments
     parser.add_argument("--patient-aggregate", action="store_true",
                        help="Run patient-level aggregation (multi-slide mode)")
@@ -1408,7 +1713,13 @@ Example:
             sys.exit(1)
 
         try:
-            pipeline = APICResearchPipeline(args.input_dir, args.output)
+            cfg = resolve_runtime_config(
+                APICPipeline.DEFAULT_CONFIG,
+                requested_num_processes=args.num_processes,
+                requested_nuclei_batch_size=args.nuclei_batch_size,
+            )
+
+            pipeline = APICResearchPipeline(args.input_dir, args.output, cfg)
             pipeline.run()
         except Exception as e:
             logger.error(f"Research pipeline failed: {e}")
@@ -1423,10 +1734,17 @@ Example:
             sys.exit(1)
 
         try:
+            cfg = resolve_runtime_config(
+                APICPipeline.DEFAULT_CONFIG,
+                requested_num_processes=args.num_processes,
+                requested_nuclei_batch_size=args.nuclei_batch_size,
+            )
+
             pipeline = APICPatientPipeline(
                 args.patient_id,
                 args.patient_folder,
-                args.output
+                args.output,
+                cfg
             )
             pipeline.run()
         except Exception as e:
@@ -1446,7 +1764,14 @@ Example:
             sys.exit(1)
 
         try:
-            pipeline = APICPipeline(args.input, args.output)
+            cfg = resolve_runtime_config(
+                APICPipeline.DEFAULT_CONFIG,
+                requested_num_processes=args.num_processes,
+                requested_nuclei_batch_size=args.nuclei_batch_size,
+            )
+
+            pipeline = APICPipeline(args.input, args.output, cfg)
+            # pipeline = APICPipeline(args.input, args.output)
             pipeline.run(args.steps)
         except Exception as e:
             logger.error(f"Pipeline failed: {e}")

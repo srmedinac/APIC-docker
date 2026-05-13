@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+umask 0002
+
 INPUT_SLIDE=""
 OUTPUT_DIR=""
 MULTI_SLIDE=false
 RESUME=false
 PATIENT_ID=""
 RESEARCH_MODE=false
+NUM_PROCESSES="${APIC_NUM_PROCESSES:-auto}"
+NUCLEI_BATCH_SIZE="${APIC_NUCLEI_BATCH_SIZE:-auto}"
+LOG_DIR=""
 
 # Timing variables for ETA calculation
 declare -a SLIDE_TIMES=()
@@ -54,6 +59,64 @@ print_progress() {
   printf "] %d/%d (%d%%)" "$current" "$total" "$percent"
 }
 
+detect_cpu_limit() {
+  local cpu_count
+  cpu_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
+
+  if [[ -f /sys/fs/cgroup/cpu.max ]]; then
+    local quota period
+    read -r quota period < /sys/fs/cgroup/cpu.max || true
+    if [[ "${quota}" != "max" && -n "${quota}" && -n "${period}" && "${period}" -gt 0 ]]; then
+      local quota_cpus=$(( quota / period ))
+      (( quota_cpus < 1 )) && quota_cpus=1
+      if (( quota_cpus < cpu_count )); then
+        cpu_count=$quota_cpus
+      fi
+    fi
+  fi
+
+  echo "${cpu_count:-1}"
+}
+
+resolve_num_processes() {
+  local requested="${1:-auto}"
+  if [[ "${requested}" != "auto" ]]; then
+    echo "$requested"
+    return
+  fi
+
+  local cpus
+  cpus=$(detect_cpu_limit)
+  if (( cpus <= 2 )); then
+    echo 1
+  elif (( cpus <= 4 )); then
+    echo $((cpus - 1))
+  elif (( cpus <= 8 )); then
+    echo $((cpus - 1))
+  elif (( cpus <= 16 )); then
+    echo $((cpus - 4))  # Leave 4 cores for system
+  else
+    # For 32+ cores, use 24-28 workers for optimal throughput
+    echo $((cpus - 4))
+  fi
+}
+
+configure_thread_env() {
+  # Enable multithreading for optimal performance on multi-core systems
+  # These defaults will be overridden by environment if already set
+  export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
+  export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
+  export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
+  export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-4}"
+  export VECLIB_MAXIMUM_THREADS="${VECLIB_MAXIMUM_THREADS:-4}"
+  export BLIS_NUM_THREADS="${BLIS_NUM_THREADS:-4}"
+  
+  echo "Threading configuration:"
+  echo "  OMP_NUM_THREADS=$OMP_NUM_THREADS"
+  echo "  OPENBLAS_NUM_THREADS=$OPENBLAS_NUM_THREADS"
+  echo "  MKL_NUM_THREADS=$MKL_NUM_THREADS"
+}
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -81,6 +144,18 @@ while [[ $# -gt 0 ]]; do
       RESEARCH_MODE=true
       shift
       ;;
+    --num_processes)
+      NUM_PROCESSES="$2"
+      shift 2
+      ;;
+    --nuclei-batch-size)
+      NUCLEI_BATCH_SIZE="$2"
+      shift 2
+      ;;
+    --log-dir)
+      LOG_DIR="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown argument: $1"
       exit 1
@@ -95,6 +170,8 @@ if [[ -z "${INPUT_SLIDE}" || -z "${OUTPUT_DIR}" ]]; then
   echo "  --resume            Skip already-processed slides"
   echo "  --patient-id <id>   Patient identifier for multi-slide mode (required for single-patient multi-slide)"
   echo "  --research-mode     Research mode: auto-group slides by patient ID from filename"
+  echo "  --num_processes <n> Override auto-detected spaTIL worker count"
+  echo "  --nuclei-batch-size <n> Override auto-detected HoVerNet batch size"
   echo ""
   echo "Modes:"
   echo "  Single slide:       -i /path/to/slide.svs -o /output"
@@ -114,12 +191,23 @@ echo "============================================================"
 echo "  APIC PIPELINE - Predictive Biomarker for Prostate Cancer"
 echo "============================================================"
 echo ""
+configure_thread_env
+RESOLVED_NUM_PROCESSES=$(resolve_num_processes "${NUM_PROCESSES}")
 echo "  Input:  ${INPUT_SLIDE}"
 echo "  Output: ${OUTPUT_DIR}"
+echo "  spaTIL workers: ${RESOLVED_NUM_PROCESSES} (requested: ${NUM_PROCESSES})"
+echo "  HoVerNet batch size: ${NUCLEI_BATCH_SIZE}"
 [[ "$RESUME" == "true" ]] && echo "  Mode:   Resume (skipping completed slides)"
 echo ""
 
 mkdir -p "${OUTPUT_DIR}"
+
+umask 0002
+
+if [[ -z "${LOG_DIR}" ]]; then
+  LOG_DIR="${OUTPUT_DIR}/logs"
+fi
+mkdir -p "${LOG_DIR}"
 
 SUPPORTED_EXTS=("svs" "tif" "tiff" "ndpi" "mrxs" "scn")
 
@@ -127,42 +215,65 @@ run_one () {
   local SLIDE="$1"
   local STEPS_ARG="${2:-}"
   local SLIDE_NAME=$(basename "$SLIDE" | sed 's/\.[^.]*$//')
-  local COMPLETION_MARKER="${OUTPUT_DIR}/${SLIDE_NAME}/.complete"
-  local SLIDE_START=$(date +%s)
-
-  # Check if already processed (resume mode)
-  if [[ "$RESUME" == "true" && -f "$COMPLETION_MARKER" ]]; then
-    echo "  [SKIP] Already processed: $SLIDE_NAME"
-    return 0
+  local -a FEATURE_ARGS=(--num_processes "$RESOLVED_NUM_PROCESSES")
+  if [[ "${NUCLEI_BATCH_SIZE}" != "auto" ]]; then
+    FEATURE_ARGS+=(--nuclei-batch-size "$NUCLEI_BATCH_SIZE")
   fi
+  # local COMPLETION_MARKER="${OUTPUT_DIR}/${SLIDE_NAME}/.complete"
+  local SLIDE_START=$(date +%s)
+  local TS=$(date +"%Y%m%d_%H%M%S")
+  local SLIDE_LOG="${LOG_DIR}/${SLIDE_NAME}_${TS}.log"
+
+  echo "  Log file: ${SLIDE_LOG}"
+
+  # # Check if already processed (resume mode)
+  # if [[ "$RESUME" == "true" && -f "$COMPLETION_MARKER" ]]; then
+  #   echo "  [SKIP] Already processed: $SLIDE_NAME"
+  #   return 0
+  # fi
 
   echo ""
   echo "  Processing: $SLIDE_NAME"
   echo "  ------------------------------------------------------------"
 
   echo "  [1/2] Tissue segmentation & patch extraction..."
-  conda run --no-capture-output -n histoqc_env python -u /app/tissue_segmentation_patches.py \
-    -i "$SLIDE" \
-    -o "$OUTPUT_DIR"
+  {
+    conda run --no-capture-output -n histoqc_env python -u /app/tissue_segmentation_patches.py \
+      -i "$SLIDE" \
+      -o "$OUTPUT_DIR"
+  } 2>&1 | tee -a "${SLIDE_LOG}"
+  test ${PIPESTATUS[0]} -eq 0 || { echo "  [ERROR] Tissue segmentation & patch extraction failed"; return 1; }
 
   echo "  [2/2] Feature extraction & biomarker prediction..."
   if [[ -n "$STEPS_ARG" ]]; then
+  {
     conda run --no-capture-output -n apic_env python -u /app/feature_extraction_prediction.py \
       -i "$SLIDE" \
       -o "$OUTPUT_DIR" \
+      "${FEATURE_ARGS[@]}" \
       --steps $STEPS_ARG
+  } 2>&1 | tee -a "${SLIDE_LOG}"
+  test ${PIPESTATUS[0]} -eq 0 || { echo "  [ERROR] Feature extraction & prediction failed"; return 1;    }
   else
+  {
     conda run --no-capture-output -n apic_env python -u /app/feature_extraction_prediction.py \
       -i "$SLIDE" \
-      -o "$OUTPUT_DIR"
+      -o "$OUTPUT_DIR" \
+      "${FEATURE_ARGS[@]}"
+  } 2>&1 | tee -a "${SLIDE_LOG}"
+  test ${PIPESTATUS[0]} -eq 0 || { echo "  [ERROR] Feature extraction & prediction failed"; return 1; }
   fi
 
-  # Mark as complete
-  touch "$COMPLETION_MARKER"
+  # # Mark as complete
+  # touch "$COMPLETION_MARKER"
 
   local SLIDE_END=$(date +%s)
   local SLIDE_DURATION=$((SLIDE_END - SLIDE_START))
   SLIDE_TIMES+=($SLIDE_DURATION)
+
+  # ADD THIS LINE -- to ensure output files are group-writable
+  chmod -R g+rwX "${OUTPUT_DIR}/${SLIDE_NAME}" || true
+
   echo ""
   echo "  Completed in $(format_time $SLIDE_DURATION)"
 }
@@ -221,6 +332,7 @@ process_patient_folder () {
     --patient-aggregate \
     --patient-id "$PATIENT_ID" \
     --patient-folder "${PATIENT_FOLDER}" \
+    --num_processes "$RESOLVED_NUM_PROCESSES" \
     -o "$OUTPUT_DIR"
 }
 
@@ -342,6 +454,7 @@ elif [[ "${RESEARCH_MODE}" == "true" ]] && [[ -d "${INPUT_SLIDE}" ]]; then
   conda run --no-capture-output -n apic_env python -u /app/feature_extraction_prediction.py \
     --research-aggregate \
     --input-dir "${INPUT_SLIDE}" \
+    --num_processes "$RESOLVED_NUM_PROCESSES" \
     -o "$OUTPUT_DIR"
 
 elif [[ -d "${INPUT_SLIDE}" ]]; then

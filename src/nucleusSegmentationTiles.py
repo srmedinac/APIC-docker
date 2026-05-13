@@ -1,10 +1,17 @@
 import math, sys, time, glob, os
+
+# Enable multithreading for numpy and OpenCV before importing them
+os.environ['OPENBLAS_NUM_THREADS'] = '4'
+os.environ['MKL_NUM_THREADS'] = '4'
+os.environ['NUMEXPR_NUM_THREADS'] = '4'
+os.environ['OMP_NUM_THREADS'] = '4'
+
 import warnings
 import geojson
-import matplotlib.pyplot as plt
 from PIL import ImageStat, Image
 from skimage.measure import approximate_polygon
 import cv2
+cv2.setNumThreads(4)  # Optimize OpenCV threading
 import numpy as np
 import torch
 import torch.nn as nn
@@ -717,7 +724,20 @@ def load_model(path, mode, nr_types):
         
         #net = torch.nn.DataParallel(net, device_ids=[0, 1])
         if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            print(f"CUDA available: True | visible GPUs: {gpu_count}")
             net = net.cuda()
+            if gpu_count > 1:
+                net = torch.nn.DataParallel(net)
+                print("Multi-GPU enabled with DataParallel")
+            else:
+                print("Single-GPU mode")
+        else:
+            print("CUDA available: False | running on CPU")
+
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
+
         return net
 
 
@@ -729,7 +749,7 @@ def infer_step(patch_imgs):
     model.eval()  # infer mode
 
     # --------------------------------------------------------------
-    with torch.no_grad():  # dont compute gradient
+    with torch.inference_mode():
         device = next(model.parameters()).device ## added to run patch_imgs on same device as model
         patch_imgs_gpu = patch_imgs_gpu.to(device) ## added to run patch_imgs on same device as model
         pred_dict = model(patch_imgs_gpu)
@@ -813,52 +833,120 @@ def processOneTile(tile):
 
     return dataCounter
 
+def build_padded_tile(tile, shift, half_shift):
+    patchSize = tile.size[0]
+    ntile = Image.new('RGB', (patchSize + shift, patchSize + shift))
+    ntile.paste(tile, (half_shift, half_shift))
+    return np.array(ntile), patchSize
+
+
+def render_pred_info_mask(pred_info, type_info, patch_size, shift, half_shift):
+    """Render nuclei type contours directly into an output mask."""
+    padded_size = patch_size + shift
+    mask = np.zeros((padded_size, padded_size), dtype=np.uint8)
+
+    for value in pred_info.values():
+        contour = value.get('contour')
+        nucleus_type = value.get('type')
+        if contour is None or nucleus_type is None or len(contour) < 10:
+            continue
+
+        type_meta = type_info.get(str(nucleus_type))
+        if type_meta is None:
+            continue
+
+        contour = np.asarray(contour, dtype=np.int32)
+        contour[:, 0] += half_shift
+        contour[:, 1] += half_shift
+        fill_value = int(nucleus_type) + 1
+        cv2.fillPoly(mask, [contour], fill_value)
+
+    return mask[half_shift:patch_size + half_shift, half_shift:patch_size + half_shift]
+
 if __name__ == '__main__':
     dataPath = sys.argv[1]
     ext = sys.argv[2]
     modelPath = sys.argv[3]
     modelMode = sys.argv[4]
     nr_types = int(sys.argv[5])
-    typeInfoPath = sys.argv[6]
-    outPath = sys.argv[7]
-    
-    batchSize=1
-    shift=96
-    half_shift=int(shift/2)
-    batchInfo = [None]*batchSize
+    batchSize = int(sys.argv[6])
+    typeInfoPath = sys.argv[7]
+    outPath = sys.argv[8]
 
-    files = sorted(glob.glob(os.path.join(dataPath, '*'+ext)))
+    # shift=96
+    # half_shift=int(shift/2)
+    # batchInfo = [None]*batchSize
+
+    # files = sorted(glob.glob(os.path.join(dataPath, '*'+ext)))
+    # print(f'{len(files)} files have been read.')
+    
+    # endInd = len(files)
+    
+    # with open(typeInfoPath) as f:
+    #     type_info = geojson.load(f)
+    # print('Type info has been loaded.')
+
+    # model = load_model(modelPath, modelMode, nr_types=nr_types)
+    # print('Model has been loaded.')
+    # print('Processing slide: ', dataPath)
+    # for i in tqdm(range(0, endInd), desc="Segmenting tiles", file=sys.stdout, ncols=80, position=0, leave=True):
+    #     sampleName = os.path.basename(files[i]).replace(ext,"")
+    
+    #     sampleOutputPath = os.path.join(outPath, sampleName + '.png')
+        
+    #     tile=Image.open(files[i])
+                
+    #     patchSize=tile.size[0] #This assumes a square tile
+    #     batch = np.zeros((batchSize, patchSize+shift, patchSize+shift, 3))
+          
+    #     ntile=Image.new('RGB', (patchSize+shift, patchSize+shift))
+    #     ntile.paste(tile,(half_shift,half_shift))
+                                
+    #     dataCounter = processOneTile(ntile)
+            
+    #     if dataCounter > 0:
+    #         value=json.dumps(GEOData[:dataCounter])
+            
+    #         im=get_img_from_json_coords(patchSize+shift,patchSize+shift,value)
+    #         nim = im[half_shift:patchSize+half_shift,half_shift:patchSize+half_shift]
+    #         plt.imsave(sampleOutputPath, nim, cmap='gray')
+    shift = 96
+    half_shift = int(shift / 2)
+    files = sorted(glob.glob(os.path.join(dataPath, '*' + ext)))
     print(f'{len(files)} files have been read.')
-    
-    endInd = len(files)
-    
+
     with open(typeInfoPath) as f:
         type_info = geojson.load(f)
     print('Type info has been loaded.')
 
     model = load_model(modelPath, modelMode, nr_types=nr_types)
     print('Model has been loaded.')
+    print(f'Batch size: {batchSize}')
     print('Processing slide: ', dataPath)
-    for i in tqdm(range(0, endInd), desc="Segmenting tiles", file=sys.stdout, ncols=80, position=0, leave=True):
-        sampleName = os.path.basename(files[i]).replace(ext,"")
-    
-        sampleOutputPath = os.path.join(outPath, sampleName + '.png')
-        
-        tile=Image.open(files[i])
-                
-        patchSize=tile.size[0] #This assumes a square tile
-        batch = np.zeros((batchSize, patchSize+shift, patchSize+shift, 3))
-          
-        ntile=Image.new('RGB', (patchSize+shift, patchSize+shift))
-        ntile.paste(tile,(half_shift,half_shift))
-                                
-        dataCounter = processOneTile(ntile)
-            
-        if dataCounter > 0:
-            value=json.dumps(GEOData[:dataCounter])
-            
-            im=get_img_from_json_coords(patchSize+shift,patchSize+shift,value)
-            nim = im[half_shift:patchSize+half_shift,half_shift:patchSize+half_shift]
-            plt.imsave(sampleOutputPath, nim, cmap='gray')
-        
+
+    for start_idx in tqdm(range(0, len(files), batchSize), desc="Segmenting tiles",
+                          file=sys.stdout, ncols=80, position=0, leave=True):
+        batch_files = files[start_idx:start_idx + batchSize]
+        batch_tiles = []
+        batch_names = []
+        batch_patch_sizes = []
+
+        for f in batch_files:
+            with Image.open(f) as tile:
+                padded_tile, patchSize = build_padded_tile(tile.convert("RGB"), shift, half_shift)
+            batch_tiles.append(padded_tile)
+            batch_names.append(os.path.basename(f).replace(ext, ""))
+            batch_patch_sizes.append(patchSize)
+
+        batch = np.stack(batch_tiles, axis=0)
+        batchInfo = [(0, 0)] * len(batch_files)
+
+        predInfoList = infer_step(batch)
+
+        for predInfo, sampleName, patchSize in zip(predInfoList, batch_names, batch_patch_sizes):
+            sampleOutputPath = os.path.join(outPath, sampleName + '.png')
+            nim = render_pred_info_mask(predInfo, type_info, patchSize, shift, half_shift)
+            if np.any(nim):
+                cv2.imwrite(sampleOutputPath, nim)
+
 print("Nucleus segmentation done!")
