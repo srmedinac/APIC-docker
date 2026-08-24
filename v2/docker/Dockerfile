@@ -23,7 +23,12 @@
 #     madabhushilabapic/apic:v2.0.0 --slide /slides/foo.svs --out /out/foo/apic.json
 
 # ---- stage 1: v1's HistoQC environment, taken verbatim ---------------------------------------
-FROM madabhushilabapic/apic:v1.0.4 AS v1
+# Pinned by digest, not by tag. The v1.0.4 tag MOVED between 2026-07-27 and 2026-08-24: the image
+# this build originally used is sha256:475687400540..., which no longer resolves on the registry,
+# and the tag now points at sha256:7685d691b9a2... with different contents. A moving tag under a
+# build that copies a tissue-segmentation environment out of it is how a silent fidelity change
+# gets in, and the tissue mask is the one artifact measured as fidelity-critical.
+FROM madabhushilabapic/apic:v1.0.4@sha256:7685d691b9a29d2dbc4656ef238b745f64d1cc8cb438d304504b498f68500efa AS v1
 
 # ---- stage 2: the runtime --------------------------------------------------------------------
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
