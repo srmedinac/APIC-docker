@@ -9,7 +9,7 @@
 #   docker run --gpus all -v /slides:/in:ro -v /out:/out <image> --slide /in/x.svs --out /out
 #
 #   --slide PATH   whole-slide image (required)
-#   --out   DIR    output directory (required); writes <stem>.apic.json and <stem>.report.pdf
+#   --out   DIR    output directory (required); writes <out>/<stem>/apic.json and report.pdf
 #   --stem  NAME   output basename (default: slide filename without its extension)
 # Any other argument is passed through to apic_one_slide.py unchanged.
 set -euo pipefail
@@ -30,8 +30,16 @@ done
 mkdir -p "$OUT"
 [ -n "$STEM" ] || { STEM="$(basename "$SLIDE")"; STEM="${STEM%.*}"; }
 
-JSON="$OUT/$STEM.apic.json"
-PDF="$OUT/$STEM.report.pdf"
+# One directory PER SLIDE, and this is not cosmetic. apic_one_slide.py caches the HistoQC tissue
+# mask at dirname(--out)/tissue_mask.png with NO slide key, and reuses it whenever it is there.
+# HistoQC is not reproducible (the docstring measures ~1.2-1.5% of mask pixels moving run to run),
+# so caching is how a re-score stays bit-identical. But point two slides at one directory and the
+# second is silently scored with the first slide's tissue. Writing <out>/<stem>/ makes the cache
+# per slide, which is what the upstream `--out /out/foo/apic.json` invocation assumed all along.
+SLIDE_OUT="$OUT/$STEM"
+mkdir -p "$SLIDE_OUT"
+JSON="$SLIDE_OUT/apic.json"
+PDF="$SLIDE_OUT/report.pdf"
 
 echo "APIC:stage score"
 python3 /opt/apic/scripts/apic_one_slide.py --slide "$SLIDE" --stem "$STEM" --out "$JSON" ${PASS[@]+"${PASS[@]}"}
