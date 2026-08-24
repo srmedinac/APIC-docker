@@ -20,10 +20,14 @@ NEG_FILL = colors.HexColor("#5a97ac")
 
 BAR_X, BAR_Y = (10*mm, PAGE_H - 270*mm)
 BAR_W, BAR_H = (12*mm, 40*mm)
-# Biopsy frame adjusted to prevent overlap with interpretation/QC section
-# Y coordinate moved up (higher value) and height reduced for better spacing
-BIOPSY_IMG_FRAME = (45*mm, PAGE_H - 150*mm, 75*mm, 35*mm)
-GRID_X, GRID_Y = (142*mm, PAGE_H - 240*mm)
+# Restored to the v1.0.5 values. The "adjusted to prevent overlap" edit moved this frame from
+# 222-270 mm below the top of the page, which is the BIOPSY ANALYZED slot, up to 115-150 mm, which
+# is the middle of the page: the thumbnail then covered the TREATMENT CONSIDERATIONS band and the
+# first survival curve, and the BIOPSY ANALYZED slot rendered empty. Verified against
+# madabhushilabapic/apic:v1.0.5 and against the slot coordinates in the branded template
+# (label at y 2584-2633, caption at y 3112 in the 2592x3456 pt template).
+BIOPSY_IMG_FRAME = (45*mm, PAGE_H - 270*mm, 85*mm, 48*mm)
+GRID_X, GRID_Y = (142*mm, PAGE_H - 242*mm)
 CELL_W, CELL_H, CELL_GAP = (22*mm, 22*mm, 7*mm)
 
 
@@ -33,7 +37,7 @@ def _pil_reader(img: Image.Image) -> ImageReader:
     bio.seek(0)
     return ImageReader(bio)
 
-def rasterize_page(pdf_path: Path, page_index: int, dpi=150) -> ImageReader:
+def rasterize_page(pdf_path: Path, page_index: int, dpi=300) -> ImageReader:
     doc = fitz.open(pdf_path)
     page = doc[page_index]
     pm = page.get_pixmap(matrix=fitz.Matrix(dpi/72.0, dpi/72.0), alpha=False)
