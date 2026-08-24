@@ -72,6 +72,11 @@ ENV APIC_DOCKER_DIR=/opt/apic/v1 \
     APIC_TEMPLATE_DIR=/opt/apic/v1/data \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+RUN chmod +x /opt/apic/scripts/apic_end_to_end.sh
+
 WORKDIR /work
-ENTRYPOINT ["python3", "/opt/apic/scripts/apic_one_slide.py"]
+# apic_one_slide.py writes the JSON and no PDF, so every caller had to reimplement the same two
+# steps. This wrapper makes one invocation produce both, and checks the JSON between them. Both
+# original scripts are untouched and still reachable with `--entrypoint python3`.
+ENTRYPOINT ["/opt/apic/scripts/apic_end_to_end.sh"]
 CMD ["--help"]
