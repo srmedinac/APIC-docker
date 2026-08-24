@@ -63,6 +63,9 @@ RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt
 COPY v2/src     /opt/apic/src
 COPY v2/scripts /opt/apic/scripts
 COPY v2/models  /opt/apic/models
+# v1's page 2 with the fabricated patient, physician and sign-off redacted out. It sits
+# beside the two v1 page-1 templates that come from the v1 image.
+COPY v2/templates/HUG-REPORT-EMPTY-PAGE2.pdf /opt/apic/v1/data/
 
 # apic_one_slide.py resolves its imports and the frozen Cox model relative to its own location, so
 # this layout needs no flags. APIC_DOCKER_DIR is the only hardcoded host path in the runtime.

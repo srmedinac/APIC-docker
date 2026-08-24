@@ -34,10 +34,32 @@ import os
 TEMPLATE_DIR = os.environ.get("APIC_TEMPLATE_DIR", "/opt/apic/v1/data")
 POS_TEMPLATE = "HUG-REPORT-EMPTY-POSITIVE.pdf"
 NEG_TEMPLATE = "HUG-REPORT-EMPTY-NEGATIVE.pdf"
+# Page 2 of v1's HUG_report.pdf with every fabricated field redacted out: the mock patient
+# ("John Doe", ID M1-AAA111), the mock ordering physician ("Naoto Tokuyama, MD, PhD", "Tokyo
+# Medical University"), the mock clinical values, and the "Approved by ... Chief Pathologist"
+# sign-off. Labels, the CHAARTED supplemental block, the technical footnote and the real Medina
+# et al. citation are untouched. Built with fitz apply_redactions, so the text is removed and not
+# merely covered.
+P2_TEMPLATE = "HUG-REPORT-EMPTY-PAGE2.pdf"
 
 # Template geometry (pt), measured from the shipped PDFs.
 PAGE_W, PAGE_H = 2592.0, 3456.0
 S = PAGE_W / 210.0                     # template units per mm, so layout can be written in mm
+
+# The report is delivered on A4. Drawing happens in template space so everything registers against
+# the branded art, then the finished page is scaled into A4 as the last step. The scale is UNIFORM:
+# v1 stretched 2592x3456 into A4 with preserveAspectRatio=False, which distorts every branded
+# element by about 6%. Uniform scaling gives 595 x 793.4 pt, centred in A4 with a 24.3 pt band top
+# and bottom.
+A4_W, A4_H = 595.276, 841.890
+A4_SCALE = A4_W / PAGE_W
+A4_YOFF = (A4_H - PAGE_H * A4_SCALE) / 2.0
+
+# Biopsy panel, the BIOPSY ANALYZED slot. Measured off the branded template: the label sits at
+# y 2584-2633 from the top and the caption at y 3112, so in bottom-origin template units the slot
+# runs y 320 to 810, between "PATIENT GROUP:" on the left (x 241-370) and the image grid on the
+# right (x 1753). This is the same slot v1.0.5 used before the frame was moved to mid-page.
+BIOPSY_SLOT = (480.0, 380.0, 1060.0, 440.0)
 
 # Published CHAARTED (ECOG-ACRIN E3805) validation figures, exactly as stated on v1's page 2. These
 # are COHORT statistics from the paper, never patient-specific predictions, and are labelled as such.
@@ -80,6 +102,43 @@ def _pos_on_bar(risk, thr, span=3.0):
     return 0.5 + 0.5 * max(-1.0, min(1.0, math.log(risk / thr) / math.log(span)))
 
 
+def _biopsy_panel(slide_path, mask_path, max_px=1400):
+    """The BIOPSY ANALYZED panel: a slide thumbnail with the HistoQC tissue outlined in green.
+
+    v1 drew the same thing and captioned it "green contours show tissue following QC". v1 could
+    read the contours off the QC directory it left on disk; the streaming pipeline keeps nothing,
+    but it does write tissue_mask.png beside apic.json, which is the same mask the tiler used. So
+    the panel shows exactly the tissue that produced the score, not a decoration.
+
+    Returns a PIL image, or None if either input is missing or unreadable. A report must still be
+    produced when the panel cannot be, so every failure here is swallowed by the caller.
+    """
+    import numpy as np
+    from PIL import Image
+    import openslide
+
+    s = openslide.OpenSlide(slide_path)
+    W, H = s.dimensions
+    scale = min(max_px / float(W), max_px / float(H), 1.0)
+    tw, th = max(1, int(W * scale)), max(1, int(H * scale))
+    thumb = s.get_thumbnail((tw, th)).convert("RGB")
+
+    m = np.array(Image.open(mask_path).convert("L").resize(thumb.size, Image.NEAREST))
+    binm = (m > 0).astype(np.uint8)
+    rgb = np.array(thumb)
+    try:
+        import cv2
+        cnts, _ = cv2.findContours(binm, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(rgb, cnts, -1, (60, 190, 60), max(1, int(round(min(tw, th) / 350.0))))
+    except Exception:
+        # No cv2: fall back to a 1 px morphological edge, which outlines the same region.
+        edge = binm.astype(bool) & ~(
+            np.roll(binm, 1, 0).astype(bool) & np.roll(binm, -1, 0).astype(bool)
+            & np.roll(binm, 1, 1).astype(bool) & np.roll(binm, -1, 1).astype(bool))
+        rgb[edge] = (60, 190, 60)
+    return Image.fromarray(rgb)
+
+
 def build(apic, out_path, thumb=None, template_dir=TEMPLATE_DIR):
     from pypdf import PdfReader, PdfWriter
     from reportlab.lib.utils import ImageReader
@@ -111,7 +170,19 @@ def build(apic, out_path, thumb=None, template_dir=TEMPLATE_DIR):
     # Risk score next to the POSITIVE/NEGATIVE bar (the bar art is part of the template).
     c.setFont("Helvetica-Bold", 13 * S / 3.6)
     c.setFillColorRGB(*(RED if positive else GREEN))
-    bar_x, bar_y0, bar_h = 27.0 * S, 236.0 * S, 40.0 * S
+    bar_x, bar_y0, bar_h = 150.0, 380.0, 440.0
+    # The POSITIVE half sits above the threshold, the NEGATIVE half below, as on v1's page 1.
+    c.setFillColorRGB(*RED)
+    c.rect(bar_x, bar_y0 + bar_h / 2.0, 90.0, bar_h / 2.0, fill=1, stroke=0)
+    c.setFillColorRGB(*GREEN)
+    c.rect(bar_x, bar_y0, 90.0, bar_h / 2.0, fill=1, stroke=0)
+    # 4.6 pt keeps both words inside the 90 pt bar; larger sizes clip to "ositive"/"gative".
+    c.setFillColorRGB(1, 1, 1); c.setFont("Helvetica-Bold", 4.6 * S / 3.6)
+    c.drawCentredString(bar_x + 45.0, bar_y0 + bar_h * 0.72, "POSITIVE")
+    c.drawCentredString(bar_x + 45.0, bar_y0 + bar_h * 0.22, "NEGATIVE")
+    c.setFillColorRGB(*(RED if positive else GREEN))
+    c.setFont("Helvetica-Bold", 13 * S / 3.6)
+    bar_x = bar_x + 90.0
     y = bar_y0 + _pos_on_bar(risk, thr) * bar_h
     c.drawString(bar_x + 6 * S, y - 1.4 * S, _fmt(risk, 3))
     p = c.beginPath()                                   # pointer triangle
@@ -121,14 +192,34 @@ def build(apic, out_path, thumb=None, template_dir=TEMPLATE_DIR):
     # The caveat banner v1 has no concept of: this score may be extrapolating.
     if apic.get("extrapolating"):
         c.setFillColorRGB(0.88, 0.63, 0.31)
-        c.rect(14 * S, PAGE_H - 88 * S, 182 * S, 9 * S, fill=1, stroke=0)
+        # The only clear full-width strip on this page: 75 pt between the "ON AVERAGE, PATIENTS
+        # IN THE APIC POSITIVE GROUP" line (ends at y 1056 bottom-origin) and the INTERPRETATION
+        # AND QUALITY CONTROL band (starts at y 981). PAGE_H - 88*S covered the CONCLUSION block;
+        # y 1935 covered the PROGNOSTIC ESTIMATES band.
+        c.rect(14 * S, 995.0, 182 * S, 52.0, fill=1, stroke=0)
         c.setFillColorRGB(1, 1, 1)
-        c.setFont("Helvetica-Bold", 7.4 * S / 3.6)
-        c.drawString(16 * S, PAGE_H - 84.2 * S,
+        c.setFont("Helvetica-Bold", 6.8 * S / 3.6)
+        c.drawString(16 * S, 1012.0,
                      "CAUTION — score extrapolates: %s outside the model's training range "
                      "(model fit at 20x; this slide %s)."
                      % (", ".join(oor) or "a feature",
                         ("%gx" % apic["objective_power"]) if apic.get("objective_power") else "magnification unknown"))
+    # BIOPSY ANALYZED panel. The slot is empty in the branded template and v1 filled it; v1.0.5
+    # placed it correctly and a later edit moved it to mid-page, over TREATMENT CONSIDERATIONS.
+    _panel = None
+    try:
+        _sl = apic.get("slide")
+        _mk = os.path.join(os.path.dirname(os.path.abspath(apic.get("_json_path") or out_path)),
+                           "tissue_mask.png")
+        if _sl and os.path.isfile(_sl) and os.path.isfile(_mk):
+            _panel = _biopsy_panel(_sl, _mk)
+    except Exception:
+        _panel = None
+    if _panel is not None:
+        bx, by, bw, bh = BIOPSY_SLOT
+        c.drawImage(ImageReader(_panel), bx, by, width=bw, height=bh,
+                    preserveAspectRatio=True, anchor="c", mask="auto")
+
     c.showPage(); c.save(); buf.seek(0)
 
     writer = PdfWriter()
@@ -136,126 +227,92 @@ def build(apic, out_path, thumb=None, template_dir=TEMPLATE_DIR):
     base.merge_page(PdfReader(buf).pages[0])
     writer.add_page(base)
 
-    # ---------- page 2: ours — provenance, not a mock patient ----------
+    # ---------- page 2: v1's branded page, with the result block in its blank band ----------
+    # The template is v1's own page 2 with every fabricated field redacted out. Its layout is
+    # untouched. The result block fills the empty band between the median-survival boxes and the
+    # technical footnote: that band is about 1180 pt tall, so the block runs in TWO COLUMNS.
+    # A single column overran into the footnote.
     b2 = io.BytesIO()
     c = canvas.Canvas(b2, pagesize=(PAGE_W, PAGE_H))
-    x0, y = 14 * S, PAGE_H - 20 * S
+    xL, xR = 20 * S, 108 * S
+    TOP = 1580.0
 
-    def head(txt, size=11):
-        nonlocal y
-        c.setFillColorRGB(*NAVY); c.rect(x0, y - 2 * S, 182 * S, 7 * S, fill=1, stroke=0)
-        c.setFillColorRGB(1, 1, 1); c.setFont("Helvetica-Bold", size * S / 3.6)
-        c.drawString(x0 + 2 * S, y, txt); y -= 11 * S
+    c.setFillColorRGB(*NAVY)
+    c.rect(xL, TOP - 2 * S, 170 * S, 7 * S, fill=1, stroke=0)
+    c.setFillColorRGB(1, 1, 1); c.setFont("Helvetica-Bold", 10 * S / 3.6)
+    c.drawString(xL + 2 * S, TOP, "RESULT FOR THIS SLIDE")
 
-    def line(label, value, warn=False):
-        nonlocal y
-        c.setFillColorRGB(*GREY); c.setFont("Helvetica", 8 * S / 3.6)
-        c.drawString(x0 + 2 * S, y, label)
-        c.setFillColorRGB(*(RED if warn else (0.12, 0.14, 0.18)))
-        c.setFont("Helvetica-Bold" if warn else "Helvetica", 8 * S / 3.6)
-        c.drawString(x0 + 70 * S, y, str(value)); y -= 5.4 * S
+    def sub(x, y, txt):
+        c.setFillColorRGB(*NAVY); c.setFont("Helvetica-Bold", 8.5 * S / 3.6)
+        c.drawString(x, y, txt)
+        return y - 5.6 * S
 
-    c.setFillColorRGB(*NAVY); c.setFont("Helvetica-Bold", 15 * S / 3.6)
-    c.drawString(x0, y, "APIC — analysis detail"); y -= 6 * S
-    c.setFillColorRGB(*GREY); c.setFont("Helvetica", 8 * S / 3.6)
-    c.drawString(x0, y, "Technical provenance for the result on page 1. Research use only."); y -= 12 * S
+    def row(x, y, label, value, colour=None, bold=False, wide=52):
+        c.setFillColorRGB(*GREY); c.setFont("Helvetica", 7.6 * S / 3.6)
+        c.drawString(x, y, label)
+        c.setFillColorRGB(*(colour or (0, 0, 0)))
+        c.setFont("Helvetica-Bold" if bold else "Helvetica", 7.6 * S / 3.6)
+        c.drawString(x + wide * S, y, value)
+        return y - 5.4 * S
 
-    head("RESULT")
-    line("APIC risk score", _fmt(risk, 6))
-    line("Risk group", "%s  (%s)" % (apic.get("risk_group") or "—", apic.get("apic_status") or "—"))
-    line("Decision threshold", _fmt(thr, 6))
+    col = RED if positive else GREEN
+    y = TOP - 12 * S
+    y = sub(xL, y, "RESULT")
+    y = row(xL, y, "Slide ID", str(apic.get("stem") or "-"))
+    y = row(xL, y, "APIC risk score", _fmt(risk, 6), col, True)
+    y = row(xL, y, "Risk group", str(apic.get("risk_group") or "-"), col, True)
+    y = row(xL, y, "Decision threshold", _fmt(thr, 6))
     y -= 3 * S
+    y = sub(xL, y, "SPECIMEN AND ACQUISITION")
+    y = row(xL, y, "Magnification", ("%gx" % apic["objective_power"]) if apic.get("objective_power") else "-")
+    y = row(xL, y, "Resolution (mpp)", _fmt(apic.get("mpp_x"), 4))
+    y = row(xL, y, "Model trained at", str(apic.get("model_trained_mag") or "-"))
+    y = row(xL, y, "Tissue tiles", "%s (%s with nuclei)"
+            % (apic.get("n_tiles_tissue"), apic.get("n_tiles_with_nuclei")))
+    y = row(xL, y, "Nuclei segmented", "{:,}".format(apic["n_nuclei"]) if apic.get("n_nuclei") else "-")
+    y = row(xL, y, "Tissue mask", str(apic.get("tissue") or "-"))
+    y_left = y
 
-    # ---- the evidence, from v1's page 2: what this GROUP looked like in CHAARTED --------------
-    head("WHAT THIS GROUP LOOKED LIKE IN CHAARTED  (published cohort data, not a patient prediction)")
-    c.setFillColorRGB(0.12, 0.14, 0.18); c.setFont("Helvetica", 7.8 * S / 3.6)
-    for chunk in _wrap(
-        "Retrospective analysis of %d men with metastatic hormone-sensitive prostate cancer in "
-        "CHAARTED (ECOG-ACRIN E3805), testing the addition of docetaxel to androgen deprivation "
-        "therapy. %d%% (%d) were APIC-Positive and had a significant survival benefit from adding "
-        "docetaxel; %d%% (%d) were APIC-Negative and showed no benefit."
-            % (CHAARTED["n"], CHAARTED["pos"]["pct"], CHAARTED["pos"]["n"],
-               CHAARTED["neg"]["pct"], CHAARTED["neg"]["n"]), 112):
-        c.drawString(x0 + 2 * S, y, chunk); y -= 4.8 * S
-    y -= 4 * S
-
-    # median-survival table; the patient's own group is highlighted so the relevant row is obvious
-    def survival_block(gx, key, title, colour, mine):
-        yy = y
-        if mine:                                    # highlight the group this slide falls into
-            c.setFillColorRGB(*[min(1.0, ch + 0.86 * (1 - ch)) for ch in colour])
-            c.rect(gx - 2 * S, yy - 20 * S, 88 * S, 26 * S, fill=1, stroke=0)
-        c.setFillColorRGB(*colour); c.circle(gx + 6 * S, yy - 6 * S, 5.5 * S, fill=1, stroke=0)
-        c.setFillColorRGB(1, 1, 1); c.setFont("Helvetica-Bold", 13 * S / 3.6)
-        c.drawCentredString(gx + 6 * S, yy - 8.4 * S, "+" if key == "pos" else "–")
-        c.setFillColorRGB(*NAVY); c.setFont("Helvetica-Bold", 8.6 * S / 3.6)
-        c.drawString(gx + 15 * S, yy - 2 * S, title + (" ← this slide" if mine else ""))
-        d = CHAARTED[key]
-        c.setFont("Helvetica", 7.6 * S / 3.6); c.setFillColorRGB(0.12, 0.14, 0.18)
-        for i, (lab, val) in enumerate((("ADT alone", d["adt"]), ("ADT + docetaxel", d["doce"]))):
-            yr = yy - (8 + i * 6) * S
-            c.drawString(gx + 15 * S, yr, lab)
-            c.setFont("Helvetica-Bold", 7.6 * S / 3.6)
-            c.drawString(gx + 52 * S, yr, "%s yr" % val[0])
-            c.setFont("Helvetica", 6.4 * S / 3.6); c.setFillColorRGB(*GREY)
-            c.drawString(gx + 66 * S, yr, "95%%CI %s" % val[1])
-            c.setFont("Helvetica", 7.6 * S / 3.6); c.setFillColorRGB(0.12, 0.14, 0.18)
-
-    c.setFillColorRGB(*GREY); c.setFont("Helvetica", 6.8 * S / 3.6)
-    c.drawString(x0 + 2 * S, y + 3 * S, "Median overall survival by group and treatment:")
-    survival_block(x0 + 2 * S, "pos", "APIC-Positive", RED, positive)
-    survival_block(x0 + 96 * S, "neg", "APIC-Negative", (0.32, 0.60, 0.75), not positive)
-    y -= 26 * S
-
-    head("MODEL FEATURES  (value, and the range the model was trained on)")
-    for k, v in feats.items():
+    y = TOP - 12 * S
+    y = sub(xR, y, "MODEL FEATURES")
+    for k in sorted(feats):
         o = oor.get(k)
-        rng = ("%s – %s" % (_fmt(o["train_min"], 4), _fmt(o["train_max"], 4))) if o else ""
-        line(k, "%s   %s" % (_fmt(v, 6), ("[outside training range %s]" % rng) if o else ""), warn=bool(o))
-    y -= 3 * S
+        c.setFillColorRGB(*GREY); c.setFont("Helvetica", 7.2 * S / 3.6)
+        c.drawString(xR, y, k[:34])
+        c.setFillColorRGB(0, 0, 0); c.setFont("Helvetica", 7.2 * S / 3.6)
+        c.drawString(xR + 56 * S, y, _fmt(feats[k], 6))
+        y -= 4.4 * S
+        if o:
+            c.setFillColorRGB(0.85, 0.48, 0.16); c.setFont("Helvetica-Oblique", 6.6 * S / 3.6)
+            c.drawString(xR + 2 * S, y, "outside training range %s - %s"
+                         % (_fmt(o.get("train_min"), 4), _fmt(o.get("train_max"), 4)))
+            y -= 4.4 * S
 
-    head("SPECIMEN & ACQUISITION")
-    line("Magnification", ("%gx" % apic["objective_power"]) if apic.get("objective_power") else "unknown",
-         warn=not apic.get("objective_power"))
-    line("Resolution (mpp)", _fmt(apic.get("mpp_x"), 4))
-    line("Model trained at", apic.get("model_trained_mag") or "20x (CHAARTED)")
-    line("Tissue tiles analysed", "%s (%s contained nuclei)" % (apic.get("n_tiles_tissue"), apic.get("n_tiles_with_nuclei")))
-    line("Nuclei segmented", "{:,}".format(apic.get("n_nuclei") or 0))
-    line("Tissue mask", apic.get("tissue") or "—", warn=(apic.get("tissue") not in (None, "histoqc")))
-    y -= 3 * S
+    if apic.get("extrapolating"):
+        yb = min(y_left, y) - 4 * S
+        c.setFillColorRGB(0.88, 0.63, 0.31)
+        c.rect(xL, yb - 2 * S, 170 * S, 7 * S, fill=1, stroke=0)
+        c.setFillColorRGB(1, 1, 1); c.setFont("Helvetica-Bold", 7.4 * S / 3.6)
+        c.drawString(xL + 2 * S, yb,
+                     "CAUTION - score extrapolates: %d of %d features fall outside the training range."
+                     % (len(oor), len(feats)))
 
-    if apic.get("warning"):
-        head("CAUTION")
-        c.setFillColorRGB(*RED); c.setFont("Helvetica", 8 * S / 3.6)
-        for chunk in _wrap(apic["warning"], 105):
-            c.drawString(x0 + 2 * S, y, chunk); y -= 5 * S
-        y -= 3 * S
-
-    # validation statement + citation, mirroring v1's footer
-    c.setFillColorRGB(*GREY); c.setFont("Helvetica", 6.4 * S / 3.6)
-    y = max(y, 34 * S)
-    for chunk in _wrap(VALIDATION, 150):
-        c.drawString(x0, y, chunk); y -= 3.8 * S
-    y -= 2 * S
-    for chunk in _wrap("Which group benefits depends on the therapy: APIC-Positive is associated with "
-                       "benefit from docetaxel (CHAARTED); APIC-Negative with benefit from enzalutamide "
-                       "(ENZAMET). Absolute-risk estimates are not reported: APIC yields a relative risk "
-                       "score, not a calibrated absolute risk.", 150):
-        c.drawString(x0, y, chunk); y -= 3.8 * S
-    y -= 2 * S
-    for chunk in _wrap(CITATION, 150):
-        c.drawString(x0, y, chunk); y -= 3.8 * S
-
-    if thumb and os.path.isfile(thumb):
-        try:
-            c.drawImage(ImageReader(thumb), x0, 14 * S, width=60 * S, height=45 * S,
-                        preserveAspectRatio=True, anchor="sw", mask="auto")
-            c.setFillColorRGB(*GREY); c.setFont("Helvetica", 7 * S / 3.6)
-            c.drawString(x0, 10 * S, "Slide overview")
-        except Exception:
-            pass
     c.showPage(); c.save(); b2.seek(0)
-    writer.add_page(PdfReader(b2).pages[0])
+    p2 = PdfReader(os.path.join(template_dir, P2_TEMPLATE)).pages[0]
+    p2.merge_page(PdfReader(b2).pages[0])
+    writer.add_page(p2)
+
+    # ---------- deliver on A4 ----------
+    # Both pages are drawn in the template's own 2592 x 3456 pt space so every value registers
+    # against the branded art. Scale that into A4 as the last step, uniformly, and centre it: v1
+    # stretched the same art into A4 with preserveAspectRatio=False and distorted every element by
+    # about 6%. A page left at 2592 x 3456 pt is 914 x 1219 mm, a poster, and will not print.
+    from pypdf import Transformation
+    for pg in writer.pages:
+        pg.add_transformation(Transformation().scale(A4_SCALE, A4_SCALE).translate(0, A4_YOFF))
+        pg.mediabox.lower_left = (0, 0)
+        pg.mediabox.upper_right = (A4_W, A4_H)
+        pg.cropbox = pg.mediabox
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     with open(out_path, "wb") as f:
@@ -287,6 +344,7 @@ def main():
         d["_mtime"] = os.path.getmtime(a.apic)
     except OSError:
         pass
+    d["_json_path"] = os.path.abspath(a.apic)
     print(build(d, a.out, thumb=a.thumb, template_dir=a.template_dir))
 
 
