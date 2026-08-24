@@ -3,12 +3,13 @@
 #
 #   ./docker/build_and_push.sh              # prompts, defaults to the version below
 #   ./docker/build_and_push.sh 2.0.1        # non-interactive
-#   PUSH_LATEST=0 ./docker/build_and_push.sh 2.0.1   # tag :latest locally but do NOT push it
+#   PUSH_LATEST=1 ./docker/build_and_push.sh 2.0.2   # ALSO move :latest to this build
 #
-# Publishes madabhushilabapic/apic:vX.Y.Z (+ :latest unless PUSH_LATEST=0).
-# NOTE ON :latest — v2 is a different pipeline from v1 (streaming, no MATLAB, HistoQC vendored, and
-# CLI args differ). Moving :latest to v2 changes behaviour for anyone pulling it, so it is opt-out
-# here on purpose: publish the version tag first, verify, then move :latest deliberately.
+# Publishes madabhushilabapic/apic:vX.Y.Z only. :latest is left alone.
+# NOTE ON :latest. v2 is a different pipeline from v1. It streams, it drops MATLAB, it vendors
+# HistoQC, and its CLI arguments differ. :latest holds the stable v1 release, and everything that
+# pulls it expects v1, so moving it is opt-in and deliberate. Publish the version tag, verify it,
+# then move :latest by hand if that is what you want.
 set -euo pipefail
 
 REPO="${APIC_REPO:-madabhushilabapic/apic}"
@@ -24,12 +25,12 @@ fi
 
 VERSION_TAG="${REPO}:v${VERSION}"
 LATEST_TAG="${REPO}:latest"
-PUSH_LATEST="${PUSH_LATEST:-1}"
+PUSH_LATEST="${PUSH_LATEST:-0}"
 
 echo "============================================================"
 echo "  APIC v2 image"
 echo "    version tag : ${VERSION_TAG}"
-echo "    latest tag  : ${LATEST_TAG} $([[ "$PUSH_LATEST" == "1" ]] && echo '(will push)' || echo '(local only)')"
+echo "    latest tag  : ${LATEST_TAG} $([[ "$PUSH_LATEST" == "1" ]] && echo '(will MOVE to this build)' || echo '(untouched, stays on v1)')"
 echo "    context     : ${ROOT}"
 echo "============================================================"
 
@@ -52,7 +53,11 @@ subprocess.run(['/opt/conda/envs/histoqc_env/bin/python','-m','histoqc','--help'
                check=True, capture_output=True); print('  histoqc: OK')
 import torch; print('  torch', torch.__version__, '| cuda build', torch.version.cuda)
 "
-docker tag "${VERSION_TAG}" "${LATEST_TAG}"
+# Retag :latest only when it is being published. An unconditional tag moves the local
+# :latest off the v1 image, which is what the viewer runs.
+if [[ "$PUSH_LATEST" == "1" ]]; then
+  docker tag "${VERSION_TAG}" "${LATEST_TAG}"
+fi
 echo "  size: $(docker image inspect "${VERSION_TAG}" --format '{{.Size}}' | awk '{printf "%.1f GB", $1/1e9}')"
 
 echo "[3/4] pushing ${VERSION_TAG}..."
@@ -62,7 +67,7 @@ if [[ "$PUSH_LATEST" == "1" ]]; then
   echo "[4/4] pushing ${LATEST_TAG}..."
   docker push "${LATEST_TAG}"
 else
-  echo "[4/4] skipping :latest push (PUSH_LATEST=0)"
+  echo "[4/4] :latest untouched, still the stable v1 release (set PUSH_LATEST=1 to move it)"
 fi
 
 echo "============================================================"
