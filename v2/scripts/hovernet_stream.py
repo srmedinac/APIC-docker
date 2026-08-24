@@ -23,7 +23,7 @@ import types
 
 import numpy as np
 
-APIC_DOCKER = os.environ.get("APIC_DOCKER_DIR", "/home/smedin7/Documents/APIC-docker")
+APIC_DOCKER = os.environ.get("APIC_DOCKER_DIR", "/opt/apic/v1")
 
 # The v1 driver imports `geojson` only to json.load the type_info file. It isn't installed in the
 # trident env, so stub it rather than mutate a shared environment (behaviour is identical).
