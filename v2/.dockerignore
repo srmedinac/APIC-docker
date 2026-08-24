@@ -1,0 +1,14 @@
+# keep PHI and bulk data OUT of the build context (and therefore out of the published image)
+cohort/
+scratch/
+apic_v1_data/
+manifest/
+old_matlab/
+reference/
+tests/
+user_viz_zip/
+.git/
+*.csv
+*.rds
+*.mat
+MASTERSHEET.md

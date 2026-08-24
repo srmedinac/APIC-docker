@@ -1,0 +1,14 @@
+# APIC v2 runtime. Pins matter where they were measured:
+#  * numpy 2.x / scikit-image 0.25 are FINE for nucdiv + spaTIL — verified bit-identical against the
+#    old numpy-1.26 / skimage-0.19 pins across 12,072 shape values, so no v1-era pin is needed here.
+#  * HistoQC is NOT in this list: it ships as v1's own py3.8 env (see Dockerfile).
+torch>=2.4
+numpy>=2.0
+scikit-image>=0.24
+scipy>=1.11
+opencv-python-headless>=4.9
+openslide-python>=1.3
+Pillow>=10
+h5py>=3.10
+tqdm>=4.66
+geojson>=3.0
