@@ -61,6 +61,17 @@ A4_YOFF = (A4_H - PAGE_H * A4_SCALE) / 2.0
 # right (x 1753). This is the same slot v1.0.5 used before the frame was moved to mid-page.
 BIOPSY_SLOT = (480.0, 380.0, 1060.0, 440.0)
 
+# v1.0.5's page-1 furniture, converted from its A4 millimetres into template units by fraction of
+# page: x * 2592/210 across, y * 3456/297 down. K converts v1's A4 point sizes (fonts, the pointer
+# triangle, padding) into template points.
+K = PAGE_W / 595.276
+BAR_X, BAR_Y, BAR_W, BAR_H = 123.4, 314.2, 148.1, 465.5      # 10mm, 27mm, 12mm, 40mm
+GRID_X, GRID_Y = 1752.9, 640.0                                # 142mm, 55mm
+CELL_W, CELL_H = 271.5, 256.0                                 # 22mm square
+CELL_GAP_X, CELL_GAP_Y = 86.4, 81.5                           # 7mm
+POS_FILL = (0.914, 0.490, 0.455)                              # v1's #e97d74
+NEG_FILL = (0.353, 0.592, 0.675)                              # v1's #5a97ac
+
 # Published CHAARTED (ECOG-ACRIN E3805) validation figures, exactly as stated on v1's page 2. These
 # are COHORT statistics from the paper, never patient-specific predictions, and are labelled as such.
 CHAARTED = {
@@ -100,6 +111,48 @@ def _pos_on_bar(risk, thr, span=3.0):
     if not risk or risk <= 0 or not thr or thr <= 0:
         return 0.5
     return 0.5 + 0.5 * max(-1.0, min(1.0, math.log(risk / thr) / math.log(span)))
+
+
+def _example_patches(slide_path, mask_path, n=4, px=1024, out_px=420):
+    """Example tiles from the tissue the score was computed on, for v1's 2x2 grid.
+
+    v1 filled this grid from spatil_visualizations/, which the streaming pipeline does not keep.
+    These are the H&E tiles themselves, taken from the densest well-separated regions of the same
+    HistoQC mask the tiler used, so they are examples of the analysed tissue. They carry no nuclei
+    overlay: the masks are streamed and discarded, and redrawing them would mean a second GPU pass.
+    """
+    import numpy as np
+    from PIL import Image
+    import openslide
+
+    sl = openslide.OpenSlide(slide_path)
+    W, H = sl.dimensions
+    m = np.array(Image.open(mask_path).convert("L"))
+    mh, mw = m.shape
+    sx, sy = W / float(mw), H / float(mh)
+
+    step = max(1, int(round(px / max(sx, sy))))
+    cand = []
+    for r in range(0, max(1, mh - step), step):
+        for cc in range(0, max(1, mw - step), step):
+            if float((m[r:r + step, cc:cc + step] > 0).mean()) >= 0.9:
+                cand.append((r, cc))
+    if not cand:
+        return []
+    picked, sep = [], max(step * 3, 1)
+    for r, cc in cand:
+        if all(abs(r - pr) > sep or abs(cc - pc) > sep for pr, pc in picked):
+            picked.append((r, cc))
+        if len(picked) == n:
+            break
+    out = []
+    for r, cc in picked:
+        try:
+            t = sl.read_region((int(cc * sx), int(r * sy)), 0, (px, px)).convert("RGB")
+            out.append(t.resize((out_px, out_px), Image.LANCZOS))
+        except Exception:
+            pass
+    return out
 
 
 def _biopsy_panel(slide_path, mask_path, max_px=1400):
@@ -167,43 +220,51 @@ def build(apic, out_path, thumb=None, template_dir=TEMPLATE_DIR):
     made = _dt.datetime.fromtimestamp(apic.get("_mtime") or _dt.datetime.utcnow().timestamp(), _dt.timezone.utc)
     c.drawString(30 * S, PAGE_H - 68 * S, made.strftime("%Y-%m-%d"))
 
-    # Risk score next to the POSITIVE/NEGATIVE bar (the bar art is part of the template).
-    c.setFont("Helvetica-Bold", 13 * S / 3.6)
-    c.setFillColorRGB(*(RED if positive else GREEN))
-    bar_x, bar_y0, bar_h = 150.0, 380.0, 440.0
-    # The POSITIVE half sits above the threshold, the NEGATIVE half below, as on v1's page 1.
-    c.setFillColorRGB(*RED)
-    c.rect(bar_x, bar_y0 + bar_h / 2.0, 90.0, bar_h / 2.0, fill=1, stroke=0)
-    c.setFillColorRGB(*GREEN)
-    c.rect(bar_x, bar_y0, 90.0, bar_h / 2.0, fill=1, stroke=0)
-    # 4.6 pt keeps both words inside the 90 pt bar; larger sizes clip to "ositive"/"gative".
-    c.setFillColorRGB(1, 1, 1); c.setFont("Helvetica-Bold", 4.6 * S / 3.6)
-    c.drawCentredString(bar_x + 45.0, bar_y0 + bar_h * 0.72, "POSITIVE")
-    c.drawCentredString(bar_x + 45.0, bar_y0 + bar_h * 0.22, "NEGATIVE")
-    c.setFillColorRGB(*(RED if positive else GREEN))
-    c.setFont("Helvetica-Bold", 13 * S / 3.6)
-    bar_x = bar_x + 90.0
-    y = bar_y0 + _pos_on_bar(risk, thr) * bar_h
-    c.drawString(bar_x + 6 * S, y - 1.4 * S, _fmt(risk, 3))
-    p = c.beginPath()                                   # pointer triangle
-    p.moveTo(bar_x, y); p.lineTo(bar_x - 4 * S, y + 2.2 * S); p.lineTo(bar_x - 4 * S, y - 2.2 * S)
-    p.close(); c.drawPath(p, fill=1, stroke=0)
+    # v1.0.5's vertical NEGATIVE-to-POSITIVE bar with the pointer triangle, ported unchanged.
+    # The split sits at the threshold on a fixed 0..2 scale and the pointer maps the score
+    # piecewise inside whichever region it falls in. An earlier version here used a log scale
+    # centred on the threshold, which put the triangle in a different place for the same score.
+    _x, _y, _w, _h = BAR_X, BAR_Y, BAR_W, BAR_H
+    cut = float(max(0.0, min(2.0, thr)))
+    split_y = _y + (cut / 2.0) * _h
+    c.setFillColorRGB(*NEG_FILL); c.rect(_x, _y, _w, max(0, split_y - _y), fill=1, stroke=0)
+    c.setFillColorRGB(*POS_FILL); c.rect(_x, split_y, _w, max(0, (_y + _h) - split_y), fill=1, stroke=0)
+    c.setStrokeColorRGB(1, 1, 1); c.setLineWidth(0.8 * K)
+    c.line(_x - 2 * K, split_y, _x + _w + 2 * K, split_y)
 
-    # The caveat banner v1 has no concept of: this score may be extrapolating.
-    if apic.get("extrapolating"):
-        c.setFillColorRGB(0.88, 0.63, 0.31)
-        # The only clear full-width strip on this page: 75 pt between the "ON AVERAGE, PATIENTS
-        # IN THE APIC POSITIVE GROUP" line (ends at y 1056 bottom-origin) and the INTERPRETATION
-        # AND QUALITY CONTROL band (starts at y 981). PAGE_H - 88*S covered the CONCLUSION block;
-        # y 1935 covered the PROGNOSTIC ESTIMATES band.
-        c.rect(14 * S, 995.0, 182 * S, 52.0, fill=1, stroke=0)
-        c.setFillColorRGB(1, 1, 1)
-        c.setFont("Helvetica-Bold", 6.8 * S / 3.6)
-        c.drawString(16 * S, 1012.0,
-                     "CAUTION — score extrapolates: %s outside the model's training range "
-                     "(model fit at 20x; this slide %s)."
-                     % (", ".join(oor) or "a feature",
-                        ("%gx" % apic["objective_power"]) if apic.get("objective_power") else "magnification unknown"))
+    c.setFillColorRGB(1, 1, 1); c.setFont("Helvetica-Bold", 6.5 * K)
+    pos_h, neg_h = (_y + _h) - split_y, split_y - _y
+    pos_mid = split_y + max(6 * K, pos_h / 2.0) - 4 * K
+    neg_mid = _y + max(6 * K, neg_h / 2.0) - 4 * K
+    if pos_h < 8 * K: pos_mid = split_y + 6 * K
+    if neg_h < 8 * K: neg_mid = _y + 6 * K
+    c.drawCentredString(_x + _w / 2.0, pos_mid, "POSITIVE")
+    c.drawCentredString(_x + _w / 2.0, neg_mid, "NEGATIVE")
+
+    pad = 2.0 * K
+    sc = float(risk)
+    if sc <= cut:
+        frac = (sc / cut) if cut > 0 else 0.0
+        py = _y + pad + frac * (max(0, split_y - _y) - 2 * pad)
+    else:
+        pmin, pmax = cut + 0.01, 2.0
+        if sc > pmax:
+            py = _y + _h - pad
+        elif sc <= pmin:
+            py = split_y + pad
+        else:
+            py = split_y + pad + ((sc - pmin) / (pmax - pmin)) * (max(0, (_y + _h) - split_y) - 2 * pad)
+
+    ptr = POS_FILL if sc >= (cut + 0.01) else NEG_FILL
+    c.setFillColorRGB(*ptr); c.setStrokeColorRGB(*ptr)
+    aw, ah = 8 * K, 10 * K
+    axl = _x + _w + 4 * K
+    pth = c.beginPath()
+    pth.moveTo(axl, py - ah / 2); pth.lineTo(axl + aw, py); pth.lineTo(axl, py + ah / 2)
+    pth.close(); c.drawPath(pth, stroke=0, fill=1)
+    c.setFont("Helvetica-Bold", 10 * K)
+    c.drawString(axl + aw + 3 * K, py - 3 * K, "%.2f" % sc)
+
     # BIOPSY ANALYZED panel. The slot is empty in the branded template and v1 filled it; v1.0.5
     # placed it correctly and a later edit moved it to mid-page, over TREATMENT CONSIDERATIONS.
     _panel = None
@@ -220,6 +281,19 @@ def build(apic, out_path, thumb=None, template_dir=TEMPLATE_DIR):
         c.drawImage(ImageReader(_panel), bx, by, width=bw, height=bh,
                     preserveAspectRatio=True, anchor="c", mask="auto")
 
+    # The 2x2 example grid, at v1.0.5's GRID_X / GRID_Y / CELL geometry.
+    try:
+        _tiles = _example_patches(_sl, _mk) if (_sl and _mk and os.path.isfile(_mk)) else []
+    except Exception:
+        _tiles = []
+    for _i, _t in enumerate(_tiles[:4]):
+        _row, _col = divmod(_i, 2)
+        c.drawImage(ImageReader(_t),
+                    GRID_X + _col * (CELL_W + CELL_GAP_X),
+                    GRID_Y - _row * (CELL_H + CELL_GAP_Y),
+                    width=CELL_W, height=CELL_H,
+                    preserveAspectRatio=True, anchor="c", mask="auto")
+
     c.showPage(); c.save(); buf.seek(0)
 
     writer = PdfWriter()
@@ -227,80 +301,11 @@ def build(apic, out_path, thumb=None, template_dir=TEMPLATE_DIR):
     base.merge_page(PdfReader(buf).pages[0])
     writer.add_page(base)
 
-    # ---------- page 2: v1's branded page, with the result block in its blank band ----------
-    # The template is v1's own page 2 with every fabricated field redacted out. Its layout is
-    # untouched. The result block fills the empty band between the median-survival boxes and the
-    # technical footnote: that band is about 1180 pt tall, so the block runs in TWO COLUMNS.
-    # A single column overran into the footnote.
-    b2 = io.BytesIO()
-    c = canvas.Canvas(b2, pagesize=(PAGE_W, PAGE_H))
-    xL, xR = 20 * S, 108 * S
-    TOP = 1580.0
-
-    c.setFillColorRGB(*NAVY)
-    c.rect(xL, TOP - 2 * S, 170 * S, 7 * S, fill=1, stroke=0)
-    c.setFillColorRGB(1, 1, 1); c.setFont("Helvetica-Bold", 10 * S / 3.6)
-    c.drawString(xL + 2 * S, TOP, "RESULT FOR THIS SLIDE")
-
-    def sub(x, y, txt):
-        c.setFillColorRGB(*NAVY); c.setFont("Helvetica-Bold", 8.5 * S / 3.6)
-        c.drawString(x, y, txt)
-        return y - 5.6 * S
-
-    def row(x, y, label, value, colour=None, bold=False, wide=52):
-        c.setFillColorRGB(*GREY); c.setFont("Helvetica", 7.6 * S / 3.6)
-        c.drawString(x, y, label)
-        c.setFillColorRGB(*(colour or (0, 0, 0)))
-        c.setFont("Helvetica-Bold" if bold else "Helvetica", 7.6 * S / 3.6)
-        c.drawString(x + wide * S, y, value)
-        return y - 5.4 * S
-
-    col = RED if positive else GREEN
-    y = TOP - 12 * S
-    y = sub(xL, y, "RESULT")
-    y = row(xL, y, "Slide ID", str(apic.get("stem") or "-"))
-    y = row(xL, y, "APIC risk score", _fmt(risk, 6), col, True)
-    y = row(xL, y, "Risk group", str(apic.get("risk_group") or "-"), col, True)
-    y = row(xL, y, "Decision threshold", _fmt(thr, 6))
-    y -= 3 * S
-    y = sub(xL, y, "SPECIMEN AND ACQUISITION")
-    y = row(xL, y, "Magnification", ("%gx" % apic["objective_power"]) if apic.get("objective_power") else "-")
-    y = row(xL, y, "Resolution (mpp)", _fmt(apic.get("mpp_x"), 4))
-    y = row(xL, y, "Model trained at", str(apic.get("model_trained_mag") or "-"))
-    y = row(xL, y, "Tissue tiles", "%s (%s with nuclei)"
-            % (apic.get("n_tiles_tissue"), apic.get("n_tiles_with_nuclei")))
-    y = row(xL, y, "Nuclei segmented", "{:,}".format(apic["n_nuclei"]) if apic.get("n_nuclei") else "-")
-    y = row(xL, y, "Tissue mask", str(apic.get("tissue") or "-"))
-    y_left = y
-
-    y = TOP - 12 * S
-    y = sub(xR, y, "MODEL FEATURES")
-    for k in sorted(feats):
-        o = oor.get(k)
-        c.setFillColorRGB(*GREY); c.setFont("Helvetica", 7.2 * S / 3.6)
-        c.drawString(xR, y, k[:34])
-        c.setFillColorRGB(0, 0, 0); c.setFont("Helvetica", 7.2 * S / 3.6)
-        c.drawString(xR + 56 * S, y, _fmt(feats[k], 6))
-        y -= 4.4 * S
-        if o:
-            c.setFillColorRGB(0.85, 0.48, 0.16); c.setFont("Helvetica-Oblique", 6.6 * S / 3.6)
-            c.drawString(xR + 2 * S, y, "outside training range %s - %s"
-                         % (_fmt(o.get("train_min"), 4), _fmt(o.get("train_max"), 4)))
-            y -= 4.4 * S
-
-    if apic.get("extrapolating"):
-        yb = min(y_left, y) - 4 * S
-        c.setFillColorRGB(0.88, 0.63, 0.31)
-        c.rect(xL, yb - 2 * S, 170 * S, 7 * S, fill=1, stroke=0)
-        c.setFillColorRGB(1, 1, 1); c.setFont("Helvetica-Bold", 7.4 * S / 3.6)
-        c.drawString(xL + 2 * S, yb,
-                     "CAUTION - score extrapolates: %d of %d features fall outside the training range."
-                     % (len(oor), len(feats)))
-
-    c.showPage(); c.save(); b2.seek(0)
-    p2 = PdfReader(os.path.join(template_dir, P2_TEMPLATE)).pages[0]
-    p2.merge_page(PdfReader(b2).pages[0])
-    writer.add_page(p2)
+    # ---------- page 2: v1's branded page, unchanged ----------
+    # v1's own page 2 with every fabricated field redacted out and nothing added. The result block
+    # and the extrapolation banner that used to be drawn here are gone: page 2 is the supplemental
+    # information sheet, exactly as the stable report had it.
+    writer.add_page(PdfReader(os.path.join(template_dir, P2_TEMPLATE)).pages[0])
 
     # ---------- deliver on A4 ----------
     # Both pages are drawn in the template's own 2592 x 3456 pt space so every value registers
