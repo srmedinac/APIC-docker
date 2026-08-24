@@ -41,7 +41,12 @@ COPY --from=v1 /opt/conda/envs/histoqc_env /opt/conda/envs/histoqc_env
 # v1 assets the pipeline calls directly: HoVer-Net weights + net definition, PanNuke types, QC config.
 COPY --from=v1 /app/models/hovernet_fast_pannuke_type_tf2pytorch.tar /opt/apic/v1/models/
 COPY --from=v1 /app/types/type_info_pannuke.json                     /opt/apic/v1/types/
-COPY --from=v1 /app/src/nucleusSegmentationTiles.py                  /opt/apic/v1/src/
+# nucleusSegmentationTiles.py comes from THIS repo, not from the v1 image. Every v1 image on the
+# registry carries a copy that predates render_pred_info_mask, which hovernet_stream.py calls:
+# v1.0.4 as it was in July is sha256 9868087b..., v1.0.4 as the tag stands now is f1a378a7..., and
+# neither defines the function. The copy that does is this repo's src/, sha256 0060103d..., which
+# is also what apic:latest carries and what the viewer runs.
+COPY src/nucleusSegmentationTiles.py                                 /opt/apic/v1/src/
 COPY --from=v1 /app/src/config_v3.ini                                /opt/apic/v1/src/
 COPY --from=v1 /app/data/HUG-REPORT-EMPTY-POSITIVE.pdf /app/data/HUG-REPORT-EMPTY-NEGATIVE.pdf /opt/apic/v1/data/
 RUN /opt/conda/envs/histoqc_env/bin/python -m histoqc --help >/dev/null   # fail the build, not a run

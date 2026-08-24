@@ -12,3 +12,14 @@ Pillow>=10
 h5py>=3.10
 tqdm>=4.66
 geojson>=3.0
+
+# Four packages the published v2.0.0 needed and did not install. Each one stops the pipeline, and
+# each was found by running the image and reading the traceback:
+#  * matplotlib — imported by the vendored v1 HoVer-Net code, fails in under a second
+#  * shapely    — imported by the vendored v1 spaTIL code
+#  * pypdf, reportlab — imported by apic_report.py, so the PDF step fails AFTER a successful score
+# Versions measured working: matplotlib 3.10.9, shapely 2.1.2, pypdf 6.16.1, reportlab 5.0.1.
+matplotlib>=3.10
+shapely>=2.1
+pypdf>=6.16
+reportlab>=5.0
