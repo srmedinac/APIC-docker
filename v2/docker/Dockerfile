@@ -20,7 +20,9 @@
 #
 # Build/publish with v2/docker/build_and_push.sh (context = repo root). Run:
 #   docker run --rm --gpus all -v /data/slides:/slides:ro -v /data/out:/out \
-#     madabhushilabapic/apic:v2.0.0 --slide /slides/foo.svs --out /out/foo/apic.json
+#     madabhushilabapic/apic:v2.0.3 --slide /slides/foo.svs --out /out
+# One patient, several slides (patient.json + patient report, APIC v1 nanmean rule):
+#   ... madabhushilabapic/apic:v2.0.3 --slide /slides/a.svs --slide /slides/b.svs --patient P1 --out /out
 
 # ---- stage 1: v1's HistoQC environment, taken verbatim ---------------------------------------
 # Pinned by digest, not by tag. The v1.0.4 tag MOVED between 2026-07-27 and 2026-08-24: the image
@@ -69,13 +71,15 @@ COPY v2/templates/HUG-REPORT-EMPTY-PAGE2.pdf /opt/apic/v1/data/
 
 # apic_one_slide.py resolves its imports and the frozen Cox model relative to its own location, so
 # this layout needs no flags. APIC_DOCKER_DIR is the only hardcoded host path in the runtime.
-ENV APIC_DOCKER_DIR=/opt/apic/v1 \
+ENV APIC_VERSION=2.0.3 \
+    APIC_DOCKER_DIR=/opt/apic/v1 \
     APIC_HISTOQC_PYTHON=/opt/conda/envs/histoqc_env/bin/python \
     APIC_HISTOQC_CONFIG=/opt/apic/v1/src/config_v3.ini \
     APIC_TEMPLATE_DIR=/opt/apic/v1/data \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 RUN chmod +x /opt/apic/scripts/apic_end_to_end.sh
+LABEL org.opencontainers.image.title="apic" org.opencontainers.image.version="2.0.3"
 
 WORKDIR /work
 # apic_one_slide.py writes the JSON and no PDF, so every caller had to reimplement the same two

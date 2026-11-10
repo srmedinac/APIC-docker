@@ -13,7 +13,7 @@
 set -euo pipefail
 
 REPO="${APIC_REPO:-madabhushilabapic/apic}"
-DEFAULT_VERSION="2.0.0"
+DEFAULT_VERSION="2.0.3"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"   # repo root (APIC-docker)
 
 VERSION="${1:-}"

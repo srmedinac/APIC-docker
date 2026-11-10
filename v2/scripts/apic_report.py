@@ -208,12 +208,13 @@ def build(apic, out_path, thumb=None, template_dir=TEMPLATE_DIR):
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(PAGE_W, PAGE_H))
 
-    # Identifier block — the ONLY identifier is the slide stem, which the viewer already displays.
+    # Identifier block — the ONLY identifier is the slide stem, which the viewer already displays,
+    # or the patient label for a patient report (apic_patient.py), which the caller supplied.
     c.setFont("Helvetica-Bold", 9 * S / 3.6)
     c.setFillColorRGB(*NAVY)
-    c.drawString(14 * S, PAGE_H - 62 * S, "Slide ID:")
+    c.drawString(14 * S, PAGE_H - 62 * S, "Patient ID:" if apic.get("patient") else "Slide ID:")
     c.setFont("Helvetica", 9 * S / 3.6)
-    c.drawString(30 * S, PAGE_H - 62 * S, str(apic.get("stem") or "—")[:60])
+    c.drawString(30 * S, PAGE_H - 62 * S, str(apic.get("patient") or apic.get("stem") or "—")[:60])
     c.setFont("Helvetica-Bold", 9 * S / 3.6)
     c.drawString(14 * S, PAGE_H - 68 * S, "Analysed:")
     c.setFont("Helvetica", 9 * S / 3.6)
