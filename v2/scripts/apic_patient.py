@@ -17,12 +17,17 @@ scored slide carries 6 finite values and the nanmean over them is a plain mean. 
 whose single feature was NaN and averaged its other features; v2 drops that slide whole. Both give
 the same patient value whenever every slide scores.)
 
-Writes <out>/patient.json, and <out>/report.pdf in the v1.0.5 report format with the patient ID
-and the patient score. The tissue panel and example tiles come from the first scored slide, as
-v1's patient pipeline took its overlay from the first slide that had one.
+Writes <out>/patient.json and <out>/report.pdf. The report follows --setting:
+  * mhspc (default): the v1.0.5 report format with the patient ID and the patient score, which carries
+    the docetaxel and ARPI treatment considerations. The tissue panel and example tiles come from the first
+    scored slide, as v1's patient pipeline took its overlay from the first slide that had one.
+  * localized: apic_report_localized.py, prognosis on radiotherapy and ADT alone and the NRG/RTOG 0521
+    docetaxel result. Treatment selection text belongs to mHSPC only.
+patient.json records setting, specimen, report ("v1" or "localized") and end_utc.
 
 Usage:
-    python3 apic_patient.py --patient P1 --out /out \\
+    python3 apic_patient.py --patient P1 --out /out [--setting localized|mhspc] [--specimen biopsy|prostatectomy] \\
+        [--image-digest sha256:...] [--report-date YYYY-MM-DD] \\
         --item /in/a.svs /out/a/apic.json --item /in/b.svs /out/b/apic.json
 Exit 0 when patient.json holds a finite risk_score and report.pdf exists; exit 1 when no slide
 scored (patient.json is still written, with null results and the error).
@@ -30,10 +35,12 @@ scored (patient.json is still written, with null results and the error).
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import math
 import os
+import re
 import sys
 import time
 
@@ -92,7 +99,16 @@ def main():
     ap.add_argument("--item", nargs=2, action="append", required=True, metavar=("SLIDE", "APIC_JSON"),
                     help="one slide and the apic.json its score stage wrote (repeat per slide, in order)")
     ap.add_argument("--model", default=MODEL)
+    ap.add_argument("--setting", choices=("mhspc", "localized"), default="mhspc",
+                    help="disease setting; treatment selection text is for mHSPC only")
+    ap.add_argument("--specimen", choices=("biopsy", "prostatectomy"), default="biopsy")
+    ap.add_argument("--image-digest", default=None, help="sha256:<64 hex>, printed in the localized report")
+    ap.add_argument("--report-date", default=None, help="YYYY-MM-DD on the localized report (default: today UTC)")
     a = ap.parse_args()
+    if a.image_digest and not re.fullmatch(r"sha256:[0-9a-f]{64}", a.image_digest):
+        sys.exit("apic: --image-digest must be sha256: and 64 hex characters")
+    if a.report_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", a.report_date):
+        sys.exit("apic: --report-date must be YYYY-MM-DD")
     t0 = time.time()
     model = apic_score.load_model(a.model)
     names = list(model["features"])
@@ -109,7 +125,8 @@ def main():
            "features": None, "risk_score": None, "risk_group": None, "apic_status": None,
            "threshold": model["threshold"], "n_slides": len(slides), "n_slides_scored": len(scored),
            "extrapolating": any(bool(s.get("extrapolating")) for s in slides if s["status"] == "scored"),
-           "slides": slides, "error": None, "seconds": None}
+           "slides": slides, "error": None, "seconds": None, "setting": a.setting, "specimen": a.specimen,
+           "report": "localized" if a.setting == "localized" else "v1", "end_utc": None}
 
     if scored:
         import numpy as np
@@ -132,6 +149,7 @@ def main():
 
     def write():
         out["seconds"] = round(time.time() - t0, 3)
+        out["end_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
         tmp = pj + ".tmp"
         with open(tmp, "w") as f:
             json.dump(out, f, indent=2, allow_nan=False)
@@ -143,12 +161,23 @@ def main():
         sys.exit(1)
 
     print("APIC:stage report", flush=True)
+    pdf = os.path.join(a.out, "report.pdf")
+    if a.setting == "localized":
+        write()                                   # the report ID is the sha256 of these final bytes
+        import apic_report_localized
+        rid = apic_report_localized.build(pj, pdf, {r["file"]: sp for r, (sp, _) in zip(slides, a.item)}, base=a.out,
+                                          image_digest=a.image_digest, report_date=a.report_date)
+        if not os.path.isfile(pdf) or os.path.getsize(pdf) == 0:
+            print("apic: no report written", file=sys.stderr)
+            sys.exit(1)
+        print(f"APIC:check patient risk_score={out['risk_score']} {out['risk_group']} "
+              f"slides {len(scored)} of {len(slides)} report {rid}", flush=True)
+        return
     import apic_report
     first_slide, first_json, _ = scored[0]
     rep = {"patient": a.patient, "stem": a.patient, "slide": first_slide, "_json_path": os.path.abspath(first_json),
            "_mtime": time.time(), "risk_score": out["risk_score"], "risk_group": out["risk_group"],
            "threshold": out["threshold"], "features": out["features"]}
-    pdf = os.path.join(a.out, "report.pdf")
     write()                                       # the result stands even if the report step fails
     apic_report.build(rep, pdf, template_dir=os.environ.get("APIC_TEMPLATE_DIR", apic_report.TEMPLATE_DIR))
     if not os.path.isfile(pdf) or os.path.getsize(pdf) == 0:

@@ -20,9 +20,13 @@
 #
 # Build/publish with v2/docker/build_and_push.sh (context = repo root). Run:
 #   docker run --rm --gpus all -v /data/slides:/slides:ro -v /data/out:/out \
-#     madabhushilabapic/apic:v2.0.3 --slide /slides/foo.svs --out /out
+#     madabhushilabapic/apic:v2.0.4 --slide /slides/foo.svs --out /out
 # One patient, several slides (patient.json + patient report, APIC v1 nanmean rule):
-#   ... madabhushilabapic/apic:v2.0.3 --slide /slides/a.svs --slide /slides/b.svs --patient P1 --out /out
+#   ... madabhushilabapic/apic:v2.0.4 --slide /slides/a.svs --slide /slides/b.svs --patient P1 --out /out
+# The report follows the disease setting. --setting mhspc (default) keeps the v1 report with its docetaxel
+# and ARPI treatment considerations; --setting localized writes the prognosis report, which carries no
+# treatment selection text:
+#   ... --patient P1 --setting localized --specimen biopsy --out /out
 
 # ---- stage 1: v1's HistoQC environment, taken verbatim ---------------------------------------
 # Pinned by digest, not by tag. The v1.0.4 tag MOVED between 2026-07-27 and 2026-08-24: the image
@@ -65,13 +69,16 @@ RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt
 COPY v2/src     /opt/apic/src
 COPY v2/scripts /opt/apic/scripts
 COPY v2/models  /opt/apic/models
+# IBM Plex Sans and Noto Sans Mono for the localized report (SIL Open Font License, files beside them).
+COPY v2/fonts   /opt/apic/fonts
 # v1's page 2 with the fabricated patient, physician and sign-off redacted out. It sits
 # beside the two v1 page-1 templates that come from the v1 image.
 COPY v2/templates/HUG-REPORT-EMPTY-PAGE2.pdf /opt/apic/v1/data/
 
 # apic_one_slide.py resolves its imports and the frozen Cox model relative to its own location, so
 # this layout needs no flags. APIC_DOCKER_DIR is the only hardcoded host path in the runtime.
-ENV APIC_VERSION=2.0.3 \
+ENV APIC_VERSION=2.0.4 \
+    APIC_FONT_DIR=/opt/apic/fonts \
     APIC_DOCKER_DIR=/opt/apic/v1 \
     APIC_HISTOQC_PYTHON=/opt/conda/envs/histoqc_env/bin/python \
     APIC_HISTOQC_CONFIG=/opt/apic/v1/src/config_v3.ini \
@@ -79,7 +86,7 @@ ENV APIC_VERSION=2.0.3 \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 RUN chmod +x /opt/apic/scripts/apic_end_to_end.sh
-LABEL org.opencontainers.image.title="apic" org.opencontainers.image.version="2.0.3"
+LABEL org.opencontainers.image.title="apic" org.opencontainers.image.version="2.0.4"
 
 WORKDIR /work
 # apic_one_slide.py writes the JSON and no PDF, so every caller had to reimplement the same two

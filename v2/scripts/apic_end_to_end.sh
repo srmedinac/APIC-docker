@@ -14,26 +14,37 @@
 #   --patient ID   patient mode: score every slide, then the patient (apic_patient.py) writes
 #                  <out>/patient.json and the patient report <out>/report.pdf. Given several
 #                  --slide without --patient, the patient label is the first slide's stem.
+#   --setting S    mhspc (default) or localized. The patient report follows it: mhspc keeps the v1
+#                  report with its docetaxel and ARPI treatment considerations; localized writes the
+#                  prognosis report (apic_report_localized.py). localized always runs patient mode.
+#   --specimen S   biopsy (default) or prostatectomy, recorded in patient.json and on the report
+#   --image-digest sha256:...   printed in the localized report traceability
+#   --report-date  YYYY-MM-DD   printed on the localized report (default: today UTC)
 # Any other argument is passed through to apic_one_slide.py unchanged.
 #
 # One slide and no --patient is the v2.0.2 behavior, unchanged: same files, same output lines.
 set -euo pipefail
 
-SLIDES=(); OUT=""; STEM=""; PATIENT=""; PASS=()
+SLIDES=(); OUT=""; STEM=""; PATIENT=""; PASS=(); SETTING="mhspc"; SPECIMEN="biopsy"; REPORT=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --slide)   SLIDES+=("$2"); shift 2 ;;
     --out)     OUT="$2";     shift 2 ;;
     --stem)    STEM="$2";    shift 2 ;;
     --patient) PATIENT="$2"; shift 2 ;;
+    --setting) SETTING="$2"; shift 2 ;;
+    --specimen) SPECIMEN="$2"; shift 2 ;;
+    --image-digest|--report-date) REPORT+=("$1" "$2"); shift 2 ;;
     -h|--help) exec python3 /opt/apic/scripts/apic_one_slide.py --help ;;
     *) PASS+=("$1"); shift ;;
   esac
 done
 [ ${#SLIDES[@]} -gt 0 ] || { echo "apic: --slide is required" >&2; exit 2; }
 [ -n "$OUT" ]   || { echo "apic: --out is required (a directory)" >&2; exit 2; }
+case "$SETTING" in mhspc|localized) ;; *) echo "apic: --setting must be mhspc or localized" >&2; exit 2 ;; esac
+case "$SPECIMEN" in biopsy|prostatectomy) ;; *) echo "apic: --specimen must be biopsy or prostatectomy" >&2; exit 2 ;; esac
 
-if [ -n "$PATIENT" ] || [ ${#SLIDES[@]} -gt 1 ]; then
+if [ -n "$PATIENT" ] || [ ${#SLIDES[@]} -gt 1 ] || [ "$SETTING" = "localized" ]; then
   # ---- patient mode ---------------------------------------------------------------------------
   [ -z "$STEM" ] || { echo "apic: --stem works with one slide and no --patient" >&2; exit 2; }
   for s in "${SLIDES[@]}"; do [ -f "$s" ] || { echo "apic: no such slide: $s" >&2; exit 2; }; done
@@ -73,7 +84,8 @@ SLIDECHECK
     ITEMS+=(--item "$s" "$d/apic.json")
   done
   echo "APIC:stage patient"
-  python3 /opt/apic/scripts/apic_patient.py --patient "$PATIENT" --out "$OUT" "${ITEMS[@]}"
+  python3 /opt/apic/scripts/apic_patient.py --patient "$PATIENT" --out "$OUT" --setting "$SETTING" \
+    --specimen "$SPECIMEN" ${REPORT[@]+"${REPORT[@]}"} "${ITEMS[@]}"
   [ -s "$OUT/report.pdf" ] || { echo "apic: no report written at $OUT/report.pdf" >&2; exit 1; }
   echo "APIC:done $OUT/patient.json $OUT/report.pdf"
   exit 0
