@@ -14,18 +14,22 @@
 #   --patient ID   patient mode: score every slide, then the patient (apic_patient.py) writes
 #                  <out>/patient.json and the patient report <out>/report.pdf. Given several
 #                  --slide without --patient, the patient label is the first slide's stem.
-#   --setting S    mhspc (default) or localized. The patient report follows it: mhspc keeps the v1
-#                  report with its docetaxel and ARPI treatment considerations; localized writes the
-#                  prognosis report (apic_report_localized.py). localized always runs patient mode.
+#   --setting S    mhspc (default) or localized; the report text follows it (apic_report_patient.py):
+#                  mhspc gives the CHAARTED docetaxel and ENZAMET enzalutamide results, localized gives
+#                  the prognosis on radiotherapy and ADT alone and the NRG/RTOG 0521 docetaxel result
 #   --specimen S   biopsy (default) or prostatectomy, recorded in patient.json and on the report
-#   --image-digest sha256:...   printed in the localized report traceability
-#   --report-date  YYYY-MM-DD   printed on the localized report (default: today UTC)
+#   --report R     v2 (default): the MAP-style patient report, always in patient mode (one slide without
+#                  --patient is a patient named by the slide stem). v1: the v1.0.5 BioRender report
+#                  (apic_report.py), mHSPC only; one slide without --patient then keeps the v2.0.2
+#                  single-slide behavior, unchanged
+#   --image-digest sha256:...   printed in the report traceability (v2)
+#   --report-date  YYYY-MM-DD   printed on the report (v2; default: today UTC)
 # Any other argument is passed through to apic_one_slide.py unchanged.
 #
-# One slide and no --patient is the v2.0.2 behavior, unchanged: same files, same output lines.
+# One slide, no --patient and --report v1 is the v2.0.2 behavior, unchanged: same files, same output lines.
 set -euo pipefail
 
-SLIDES=(); OUT=""; STEM=""; PATIENT=""; PASS=(); SETTING="mhspc"; SPECIMEN="biopsy"; REPORT=()
+SLIDES=(); OUT=""; STEM=""; PATIENT=""; PASS=(); SETTING="mhspc"; SPECIMEN="biopsy"; REPORT=(); STYLE="v2"
 while [ $# -gt 0 ]; do
   case "$1" in
     --slide)   SLIDES+=("$2"); shift 2 ;;
@@ -34,6 +38,7 @@ while [ $# -gt 0 ]; do
     --patient) PATIENT="$2"; shift 2 ;;
     --setting) SETTING="$2"; shift 2 ;;
     --specimen) SPECIMEN="$2"; shift 2 ;;
+    --report)  STYLE="$2"; shift 2 ;;
     --image-digest|--report-date) REPORT+=("$1" "$2"); shift 2 ;;
     -h|--help) exec python3 /opt/apic/scripts/apic_one_slide.py --help ;;
     *) PASS+=("$1"); shift ;;
@@ -43,8 +48,11 @@ done
 [ -n "$OUT" ]   || { echo "apic: --out is required (a directory)" >&2; exit 2; }
 case "$SETTING" in mhspc|localized) ;; *) echo "apic: --setting must be mhspc or localized" >&2; exit 2 ;; esac
 case "$SPECIMEN" in biopsy|prostatectomy) ;; *) echo "apic: --specimen must be biopsy or prostatectomy" >&2; exit 2 ;; esac
+case "$STYLE" in v2|v1) ;; *) echo "apic: --report must be v2 or v1" >&2; exit 2 ;; esac
+[ "$STYLE" = "v2" ] || [ "$SETTING" = "mhspc" ] || {
+  echo "apic: --report v1 carries mHSPC treatment considerations and is refused for --setting localized" >&2; exit 2; }
 
-if [ -n "$PATIENT" ] || [ ${#SLIDES[@]} -gt 1 ] || [ "$SETTING" = "localized" ]; then
+if [ -n "$PATIENT" ] || [ ${#SLIDES[@]} -gt 1 ] || [ "$STYLE" = "v2" ]; then
   # ---- patient mode ---------------------------------------------------------------------------
   [ -z "$STEM" ] || { echo "apic: --stem works with one slide and no --patient" >&2; exit 2; }
   for s in "${SLIDES[@]}"; do [ -f "$s" ] || { echo "apic: no such slide: $s" >&2; exit 2; }; done
@@ -85,7 +93,7 @@ SLIDECHECK
   done
   echo "APIC:stage patient"
   python3 /opt/apic/scripts/apic_patient.py --patient "$PATIENT" --out "$OUT" --setting "$SETTING" \
-    --specimen "$SPECIMEN" ${REPORT[@]+"${REPORT[@]}"} "${ITEMS[@]}"
+    --specimen "$SPECIMEN" --report "$STYLE" ${REPORT[@]+"${REPORT[@]}"} "${ITEMS[@]}"
   [ -s "$OUT/report.pdf" ] || { echo "apic: no report written at $OUT/report.pdf" >&2; exit 1; }
   echo "APIC:done $OUT/patient.json $OUT/report.pdf"
   exit 0

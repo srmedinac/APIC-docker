@@ -1,16 +1,18 @@
-"""APIC patient report for localized (non-metastatic) prostate cancer, from one patient.json.
+"""APIC patient report from one patient.json, for both disease settings, in the MAP report look.
 
-The mHSPC setting keeps the v1 report (apic_report.py), which carries the docetaxel and ARPI treatment
-considerations. Treatment selection text belongs to mHSPC only, so this report shows the APIC result, the
-prognosis on radiotherapy and ADT alone, and the docetaxel result of NRG/RTOG 0521 in a toned-down form.
-Every clinical number on it is a published NRG/RTOG 0521 figure (Medina et al., the CHAARTED and NRG/RTOG 0521
-APIC manuscript) and appears below as a constant. The look follows the MAP patient report.
+The text follows patient.json "setting":
+  * localized: prognosis on radiotherapy and ADT alone and the docetaxel result of NRG/RTOG 0521, toned down;
+    treatment selection text belongs to mHSPC only. Cites reference 1.
+  * mhspc: the docetaxel result of CHAARTED and the enzalutamide result of ENZAMET, with overall survival on ADT
+    alone in CHAARTED. Cites references 1 and 2.
+Every clinical number on the report is a published figure of those two papers and appears below as a constant.
+The v1 report (apic_report.py, BioRender template) stays in the image for --report v1 and is unused by default.
 
-    python3 apic_report_localized.py --patient-json /out/patient.json --out /out/report.pdf \\
+    python3 apic_report_patient.py --patient-json /out/patient.json --out /out/report.pdf \\
         [--slides-dir /in] [--image-digest sha256:...] [--report-date YYYY-MM-DD]
 
-Page 1: result, interpretation, overall survival at 10 years, sign-off line.
-Page 2: slides (thumbnail with the HistoQC tissue outline), test information and traceability.
+Page 1: result, interpretation, overall survival, sign-off line.
+Page 2: sample analyzed (thumbnail with the HistoQC tissue outline), test information, traceability, references.
 Report ID: APIC-<end_utc date>-<first 8 hex of the patient.json sha256, upper case>.
 """
 from __future__ import annotations
@@ -46,20 +48,53 @@ for _name, _f in [("Sans", "IBMPlexSans-Regular"), ("Sans-B", "IBMPlexSans-SemiB
     pdfmetrics.registerFont(TTFont(_name, os.path.join(FONT_DIR, f"{_f}.ttf")))
 pdfmetrics.registerFontFamily("Sans", normal="Sans", bold="Sans-B", italic="Sans", boldItalic="Sans-B")
 
-# ---- published NRG/RTOG 0521 figures (high-risk localized; the only clinical numbers this report prints) ----
-RTOG = {
-    "neg": {"os10_rtadt": (79.1, 66.9, 91.4), "hr_doce": (1.17, 0.59, 2.30)},
-    "pos": {"os10_rtadt": (52.7, 35.7, 69.8), "os10_doce": 74.4, "hr_doce": (0.49, 0.26, 0.92)},
-}
-HEADLINE = {"neg": "Favorable prognosis with radiotherapy and ADT alone",
-            "pos": "May benefit from treatment intensification"}
-BODY = {
-    "neg": ("In NRG/RTOG 0521 (high-risk localized prostate cancer), APIC-negative patients had a 10-year overall "
-            "survival of 79.1% (95% CI 66.9 to 91.4) with radiotherapy and ADT alone. Adding docetaxel: hazard "
-            "ratio 1.17 (95% CI 0.59 to 2.30)."),
-    "pos": ("In NRG/RTOG 0521 (high-risk localized prostate cancer), adding docetaxel to radiotherapy and ADT improved "
-            "overall survival in APIC-positive patients: hazard ratio 0.49 (95% CI 0.26 to 0.92). 10-year overall "
-            "survival: 74.4% with docetaxel, 52.7% with radiotherapy and ADT alone."),
+# ---- published figures: the only clinical numbers this report prints ----
+REF1 = ("Medina S, Tokuyama N, et al. A Computational Pathology Model to Predict Docetaxel Benefit in Localized "
+        "High-Risk and Metastatic Prostate Cancer. Clin Cancer Res 2026;32(3):645-653. doi:10.1158/1078-0432.CCR-25-3327")
+REF2 = ("Medina S, Tokuyama N, et al. AI-Based Pathology Classifier Predicts Sensitivity to Enzalutamide in Metastatic "
+        "Hormone-Sensitive Prostate Cancer: A Biomarker Analysis of the ENZAMET Trial. Clin Cancer Res "
+        "2026;32(20):4742-4753. doi:10.1158/1078-0432.CCR-26-0871")
+SETTINGS = {
+    # NRG/RTOG 0521 (ref 1, results 3.3): 10-year OS on RT + ADT alone; docetaxel HR by APIC group
+    "localized": {
+        "label": "Localized",
+        "headline": {"neg": "Favorable prognosis with radiotherapy and ADT alone",
+                     "pos": "May benefit from treatment intensification"},
+        "body": {
+            "neg": ("In NRG/RTOG 0521 (high-risk localized prostate cancer), APIC-negative patients had a 10-year "
+                    "overall survival of 79.1% (95% CI 66.9 to 91.4) with radiotherapy and ADT alone. Adding "
+                    "docetaxel: hazard ratio 1.17 (95% CI 0.59 to 2.30)."),
+            "pos": ("In NRG/RTOG 0521 (high-risk localized prostate cancer), adding docetaxel to radiotherapy and ADT "
+                    "improved overall survival in APIC-positive patients: hazard ratio 0.49 (95% CI 0.26 to 0.92). "
+                    "10-year overall survival: 74.4% with docetaxel, 52.7% with radiotherapy and ADT alone.")},
+        "os_title": "Overall survival at 10 years",
+        "os_note": "Radiotherapy and ADT alone, NRG/RTOG 0521.<br/>High-risk localized prostate cancer.",
+        "os": {"neg": (79.1, 66.9, 91.4), "pos": (52.7, 35.7, 69.8)},
+        "use": ["Research use only.", "High-risk localized prostate cancer."],
+        "refs": [REF1],
+        "rp_note": True,
+    },
+    # CHAARTED (ref 1, results 3.2): docetaxel HR, 5-year OS; ENZAMET (ref 2, results): enzalutamide vs NSAA HR, 60-month OS
+    "mhspc": {
+        "label": "mHSPC",
+        "headline": {"neg": "More likely to benefit from enzalutamide",
+                     "pos": "More likely to benefit from docetaxel"},
+        "body": {
+            "neg": ("In ENZAMET (mHSPC), enzalutamide improved overall survival in APIC-negative patients compared with "
+                    "a nonsteroidal antiandrogen: hazard ratio 0.50 (95% CI 0.35 to 0.73). 60-month overall survival: "
+                    "76.5% with enzalutamide, 58.3% with a nonsteroidal antiandrogen. In CHAARTED (mHSPC), adding "
+                    "docetaxel to ADT: hazard ratio 1.31 (95% CI 0.71 to 2.44)."),
+            "pos": ("In CHAARTED (mHSPC), adding docetaxel to ADT improved overall survival in APIC-positive patients: "
+                    "hazard ratio 0.52 (95% CI 0.32 to 0.85). 5-year overall survival: 40.2% with docetaxel, 15.9% with "
+                    "ADT alone. In ENZAMET (mHSPC), enzalutamide compared with a nonsteroidal antiandrogen: hazard "
+                    "ratio 1.04 (95% CI 0.67 to 1.62).")},
+        "os_title": "Overall survival at 5 years",
+        "os_note": "ADT alone, CHAARTED.",
+        "os": {"neg": (55.6, 40.9, 75.6), "pos": (15.9, 6.1, 41.6)},
+        "use": ["Research use only.", "Metastatic hormone-sensitive prostate cancer."],
+        "refs": [REF1, REF2],
+        "rp_note": False,                         # ENZAMET validated APIC on prostatectomy specimens
+    },
 }
 NOTE_EXTRAP = "Scan magnification outside the 20x training range."
 NOTE_RP = "Prostatectomy specimen: APIC validation on prostatectomies comes from mHSPC (ENZAMET)."
@@ -67,11 +102,8 @@ METHOD = ["Input: H&amp;E whole-slide images, all diagnostic slides of one patie
           "APIC measures nuclear shape diversity in the tumor and the spatial arrangement of tumor and immune cells.",
           "The 6 features are averaged over the scored slides and scored with the locked Cox model.",
           "APIC-positive above the threshold {thr}."]
-USE = ["Research use only.", "High-risk localized prostate cancer."]
 VALIDATION = ("Validated on H&amp;E core-needle biopsies in CHAARTED (mHSPC) and NRG/RTOG 0521 (high-risk localized), "
               "and on prostatectomy specimens in ENZAMET (mHSPC).")
-CITATION = ("Medina S, Tokuyama N, et al. A computational pathology model to predict docetaxel benefit in localized "
-            "high-risk and metastatic prostate cancer.")
 MINUS = "−"
 
 C = colors.HexColor
@@ -263,10 +295,11 @@ def result(c, y, rec):
     return yb - h
 
 
-def interpretation(c, y, g, notes):
+def interpretation(c, y, g, notes, S):
     st_body, st_note = style(8.6, lead=1.45), style(7.8, lead=1.4)
     inner = CW - 2 * 16
-    hb = para_h(escape(BODY[g]), inner, st_body)
+    body = S["body"][g]
+    hb = para_h(escape(body), inner, st_body)
     hn = sum(para_h(escape(n), inner - 10, st_note) + 2 for n in notes)
     h = 14 + 14 + 8 + hb + (14 + hn if notes else 0) + 12
     yb = section(c, y, "Interpretation")
@@ -275,9 +308,9 @@ def interpretation(c, y, g, notes):
     c.setFillColor(DARK)
     c.rect(X0, yb - h, 4, h, stroke=0, fill=1)
     x, yy = X0 + 16, yb - 14
-    text(c, x, yy - 10, HEADLINE[g], 11.5, "Sans-B", INK)
+    text(c, x, yy - 10, S["headline"][g], 11.5, "Sans-B", INK)
     yy -= 14 + 8
-    yy -= para(c, escape(BODY[g]), x, yy, inner, st_body)
+    yy -= para(c, escape(body), x, yy, inner, st_body)
     if notes:
         yy -= 10
         lab(c, x, yy - 4, "Notes", None, 6.2)
@@ -289,17 +322,16 @@ def interpretation(c, y, g, notes):
     return yb - h
 
 
-def outcomes(c, y, g):
+def outcomes(c, y, g, S):
     h = 86
-    yb = section(c, y, "Overall survival at 10 years")
+    yb = section(c, y, S["os_title"])
     bw, bg = 150, 10
     bx = X0 + CW - 2 * bw - bg
-    para(c, "Radiotherapy and ADT alone, NRG/RTOG 0521.<br/>High-risk localized prostate cancer.",
-         X0, yb - PAD + 1, bx - X0 - 16, style(7.8, lead=1.45))
+    para(c, S["os_note"], X0, yb - PAD + 1, bx - X0 - 16, style(7.8, lead=1.45))
     top, bh = yb - 8, h - 16
     for j, k in enumerate(("neg", "pos")):
         x, me = bx + j * (bw + bg), k == g
-        rate, lo, hi = RTOG[k]["os10_rtadt"]
+        rate, lo, hi = S["os"][k]
         c.setFillColor(alpha(DARK, 0.13 if me else 0.05))
         c.rect(x, top - bh, bw, bh, stroke=0, fill=1)
         c.setFillColor(DARK)
@@ -471,10 +503,26 @@ def slide_table(c, yb, slides, rh=15):
 TI = {"key": 84, "mono": 5.7, "lead": 8.6, "st": style(7.6, lead=1.36)}
 
 
-def ti_blocks(thr):
-    """Method and intended use beside the traceability list; validation and citation across the page under them."""
-    return ([("Method", [m.format(thr=thr) for m in METHOD]), ("Intended use", USE)],
-            [("Validation", [VALIDATION]), ("Citation", [CITATION])])
+def ti_blocks(thr, S):
+    """Method and intended use beside the traceability list; validation across the page under them."""
+    return ([("Method", [m.format(thr=thr) for m in METHOD]), ("Intended use", S["use"])],
+            [("Validation", [VALIDATION])])
+
+
+REF_ST = style(6.4, lead=1.35)
+
+
+def refs_h(refs):
+    return 10 + sum(para_h(escape(f"{i}. {r}"), CW, REF_ST) + 1.5 for i, r in enumerate(refs, 1))
+
+
+def references(c, refs):
+    """The published papers in small type at the foot of the page, above the footer."""
+    yy = BOT - 4 + refs_h(refs)
+    lab(c, X0, yy - 6, "References", None, 5.8)
+    yy -= 10
+    for i, r in enumerate(refs, 1):
+        yy -= para(c, escape(f"{i}. {r}"), X0, yy, CW, REF_ST) + 1.5
 
 
 def _blocks_h(blocks, w):
@@ -519,12 +567,15 @@ def test_info(c, y, blocks, trace):
 # ---------------------------------------------------------------- main
 
 def build(patient_json, out_pdf, slide_paths=None, base=None, image_digest=None, report_date=None):
-    """Write the localized report for patient_json. slide_paths maps a slide file name to its path; base is the
-    folder that holds <stem>/tissue_mask.png (default: the folder of patient_json)."""
+    """Write the report for patient_json in its setting (localized or mhspc). slide_paths maps a slide file name to
+    its path; base is the folder that holds <stem>/tissue_mask.png (default: the folder of patient_json)."""
     jb = open(patient_json, "rb").read()
     rec = json.loads(jb)
     if rec.get("risk_score") is None:
         raise ValueError("patient.json has no APIC result")
+    if rec.get("setting") not in SETTINGS:
+        raise ValueError(f"patient.json setting must be localized or mhspc, got {rec.get('setting')!r}")
+    S = SETTINGS[rec["setting"]]
     sha = hashlib.sha256(jb).hexdigest()
     end = rec.get("end_utc") or datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     rep = report_id(end, sha)
@@ -536,13 +587,14 @@ def build(patient_json, out_pdf, slide_paths=None, base=None, image_digest=None,
     n, used = len(slides), sum(s.get("status") == "scored" for s in slides)
     thr = num(rec["threshold"], 3)
     notes = ([NOTE_EXTRAP] if rec.get("extrapolating") else []) + \
-            ([NOTE_RP] if rec.get("specimen") == "prostatectomy" else [])
+            ([NOTE_RP] if S["rp_note"] and rec.get("specimen") == "prostatectomy" else [])
 
     fields = [("Patient ID", str(rec.get("patient") or ""), True),
               ("Specimen", "Prostatectomy" if rec.get("specimen") == "prostatectomy" else "Biopsy", False),
-              ("Setting", "Localized", False), ("Slides analyzed", f"{used} of {n}", False),
+              ("Setting", S["label"], False), ("Slides analyzed", f"{used} of {n}", False),
               ("Processed", end[:10], False), ("Report date", report_date, False)]
-    blocks = ti_blocks(thr)
+    blocks = ti_blocks(thr, S)
+    rh = refs_h(S["refs"])
     trace = [("APIC version", str(rec.get("version") or "")),
              ("Container image", image_digest.split(":", 1)[1] if image_digest else ""),
              ("Frozen model", rec.get("model_sha256") or ""),
@@ -559,8 +611,8 @@ def build(patient_json, out_pdf, slide_paths=None, base=None, image_digest=None,
     y = letterhead(cv, TOP, rep) - 8
     y = info(cv, y, fields) - GAP
     y = result(cv, y, rec) - GAP
-    y = interpretation(cv, y, g, notes) - GAP
-    y = outcomes(cv, y, g)
+    y = interpretation(cv, y, g, notes, S) - GAP
+    y = outcomes(cv, y, g, S)
     if y < BOT + 38:
         sys.exit("apic: report page 1 overflow")
     signoff(cv, BOT + 22)
@@ -568,7 +620,7 @@ def build(patient_json, out_pdf, slide_paths=None, base=None, image_digest=None,
     cv.showPage()
 
     y = running(cv, str(rec.get("patient") or ""), rep) - 8
-    y = section(cv, y, "Slides", f"{n} slides" if n != 1 else "1 slide")
+    y = section(cv, y, "Sample analyzed", f"{n} slides" if n != 1 else "1 slide")
     if n <= 6:
         text(cv, X0 + CW, y - 6, "Tissue outline", 7, anchor="r")
         lx = X0 + CW - width("Tissue outline", "Sans", 7) - 5
@@ -579,7 +631,7 @@ def build(patient_json, out_pdf, slide_paths=None, base=None, image_digest=None,
         imgs = [thumb_with_outline(slide_paths.get(s.get("file")), os.path.join(base, s.get("stem") or "", "tissue_mask.png"))
                 for s in slides]
         aspects = [(im.height / im.width) if im is not None else 0.75 for im in imgs] or [0.75]
-        gh = y - BOT - GAP - BAND - test_info_geom(blocks, trace)[3] - 4
+        gh = y - BOT - GAP - BAND - test_info_geom(blocks, trace)[3] - rh - 10
         cols, cell, fw, fh = grid_layout(aspects, max(1, n), gh)
         for row in range(math.ceil(n / cols)):
             hh = 0
@@ -591,7 +643,10 @@ def build(patient_json, out_pdf, slide_paths=None, base=None, image_digest=None,
         y -= GAP - GY
     else:
         y -= slide_table(cv, y, slides) + GAP
-    test_info(cv, y, blocks, trace)
+    y = test_info(cv, y, blocks, trace)
+    if y < BOT - 4 + rh + 6:
+        sys.exit("apic: report page 2 overflow")
+    references(cv, S["refs"])
     footer(cv, 2, pages, rep)
     cv.showPage()
     cv.save()
